@@ -1,0 +1,12 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "kube-trader.fullname" . }}
+data:
+  MARKET_DATA_PROVIDER: {{ .Values.config.marketDataProvider | quote }}
+  ALPACA_PAPER: "true"
+  TRADING_ENABLED: {{ .Values.config.tradingEnabled | quote }}
+  DATABASE_PATH: /data/market.db
+  DEFAULT_SYMBOLS: {{ .Values.config.defaultSymbols | quote }}
+  LOG_LEVEL: INFO
+

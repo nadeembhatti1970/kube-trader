@@ -1,0 +1,26 @@
+replicaCount: 1
+image:
+  repository: kube-trader
+  tag: latest
+  pullPolicy: IfNotPresent
+service:
+  type: ClusterIP
+  port: 80
+config:
+  marketDataProvider: yfinance
+  tradingEnabled: false
+  defaultSymbols: AAPL,MSFT,SPY
+persistence:
+  enabled: true
+  size: 2Gi
+  storageClass: ""
+secrets:
+  existingSecret: kube-trader-secrets
+resources:
+  requests:
+    cpu: 100m
+    memory: 256Mi
+  limits:
+    cpu: 1
+    memory: 1Gi
+

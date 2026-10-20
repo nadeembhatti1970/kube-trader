@@ -1,0 +1,7 @@
+apiVersion: v2
+name: kube-trader
+description: Self-hosted market data and paper trading starter
+type: application
+version: 0.1.0
+appVersion: "0.1.0"
+
