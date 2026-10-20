@@ -1,81 +1,97 @@
 # Kube Trader
 
-A small, self-hosted Python starter for daily stock market data, a deterministic SMA indicator, and optional manual Alpaca paper orders. It is open source and uses free or free-tier data options, subject to each provider's current terms and limits.
+Kube Trader is an open-source Python starter for a self-hosted stock research and **paper trading** pipeline. It separates the four workers in the requested flow into independent containers and Kubernetes pods. Alpaca's Python SDK exposes a stock WebSocket minute-bar stream and a separate Trading API client; this implementation uses those interfaces, with the Alpaca client explicitly created in paper mode. See the [Alpaca market stream docs](https://alpaca.markets/sdks/python/api_reference/data/stock/live.html), [paper trading guide](https://docs.alpaca.markets/us/docs/paper-trading), and [bracket-order request docs](https://alpaca.markets/sdks/python/api_reference/trading/requests.html).
 
-## What is included
+## Pipeline
 
-- FastAPI service with health checks, symbol list, daily OHLCV retrieval, and a 20-day versus 50-day simple moving average comparison.
-- Market data adapters for Yahoo Finance (`yfinance`, default) and Finnhub (`FINNHUB_API_KEY` required).
-- SQLite storage for fetched bars at `/data/market.db`.
-- Optional manual Alpaca paper-order endpoint. It is disabled by default, uses Alpaca paper mode only, and is not connected to the indicator signal.
-- Docker image, plain Kubernetes manifests, and a Helm chart.
-
-This is a deployment-ready starter, not a production portfolio manager or a strategy proven to make money. It does not implement automated execution, intraday streaming, account reconciliation, stop-loss handling, portfolio allocation, or a drawdown circuit breaker. The indicator is informational and is not investment advice. Review market-data licensing, provider availability, brokerage permissions, and applicable rules before use.
-
-## Run locally
-
-```sh
-python -m venv .venv
-. .venv/bin/activate
-pip install -r requirements.txt
-cp .env.example .env
-uvicorn app.main:app --reload
+```text
+Alpaca minute bars ──► Redis stream ──► Signals/alpha factors ──► Redis stream ──► Paper execution
+        │                        │                 │                                  │
+        └──────────────► PostgreSQL ◄─────────────┴──── Rolling backtest metrics ────┘
+                                                                                      │
+                                                          account reconciliation/risk ┘
 ```
 
-OpenAPI docs are available at `http://localhost:8000/docs`. Example routes:
+| Worker | Container command | Responsibility |
+| --- | --- | --- |
+| Ingestion | `python -m app.services.ingestion` | Alpaca IEX/SIP minute bars to PostgreSQL and the `market.bars` Redis stream |
+| Signals | `python -m app.services.signals` | 5/20-bar SMA state changes, RSI(14), and `buy`/`sell` events in `strategy.signals` |
+| Backtesting | `python -m app.services.backtesting` | Recalculates rolling 500-bar SMA returns, max drawdown, and per-bar Sharpe metric |
+| Execution | `python -m app.services.execution` | Reconciles account/positions, enforces limits, and submits paper bracket orders |
+
+FastAPI remains a separate API pod. Redis Streams carry events; PostgreSQL stores bars, strategy state, backtest metrics, account snapshots, allocation exposures, order reservations, and the daily risk state. The raw Kubernetes setup includes single-instance PostgreSQL and Redis StatefulSets with PVCs. The Helm chart deploys the same components.
+
+## Risk and execution behavior
+
+- **Paper only:** the execution worker refuses to start if `ALPACA_PAPER` is false and always constructs `TradingClient(..., paper=True)`. No live trading URL or mode is implemented.
+- **Opt-in automation:** market streaming, automated order execution, and stop repair default off. For paper automation, set valid paper credentials and set `MARKET_STREAM_ENABLED=true`, `EXECUTION_ENABLED=true`, and `STOP_MANAGEMENT_ENABLED=true` after reviewing the behavior.
+- **Signal policy:** the sample strategy is a 5/20 minute-bar SMA state change with RSI included as an observable factor; RSI is not currently used as a trade filter. Entries are long-only; `below_sma` exits bot-managed long positions. It ignores stale signals and entries while the US market is closed.
+- **Per-trade risk:** whole-share quantity is bounded by 1% of account equity divided by the configured stop distance. New entries receive Alpaca bracket orders with a stop loss and take-profit target. The default stop is 2%; the target is 4%.
+- **Allocation:** default virtual pool targets are 20% intraday, 30% swing, and 50% core. Each new entry is limited to the remaining budget of its pool. This signal worker currently emits intraday signals only; swing and core budgets are tracked for allocation reporting, but do not receive generated strategies.
+- **Drawdown breaker:** the worker uses Alpaca's same-day portfolio history for its New York session baseline, falling back to the account's previous-close equity if history is unavailable. A 3% or greater drop persists a halt for new entries until the next date and logs a critical event. If `ALERT_WEBHOOK_URL` is configured, it posts a generic JSON alert to that receiver. Existing bracket exits remain at the broker. It does not liquidate positions.
+- **Reconciliation:** every 30 seconds the worker snapshots Alpaca equity, buying power, positions, tracked/untracked symbols, allocation exposure, and missing protective stops. When stop management is enabled, it restores stops for bot-managed positions only. Review `/account/reconciliation` and `/risk`.
+- **Duplicate protection:** entry reservations use deterministic Alpaca client order IDs and a PostgreSQL uniqueness constraint. Redis events are acknowledged after processing.
+
+This is a starter implementation, not a validated strategy or a production brokerage platform. The rolling backtest omits fees, slippage, survivorship bias, corporate actions, and out-of-sample validation. It does not short securities, stream Finnhub data, execute intraday account cash transfers, or send alerts outside container logs. An attached stop order cannot guarantee a fill price. Use paper credentials and inspect orders, account state, and market-data terms before relying on the system.
+
+## Local setup
+
+Copy the sample environment file, then set paper API credentials when ready. `.env` is ignored by Git.
+
+```sh
+cp .env.example .env
+```
+
+Start the complete stack with Docker Compose:
+
+```sh
+docker compose up --build
+```
+
+OpenAPI is at `http://localhost:8000/docs`. Useful endpoints:
 
 ```sh
 curl http://localhost:8000/healthz
 curl http://localhost:8000/symbols
 curl http://localhost:8000/market-data/AAPL?days=90
 curl http://localhost:8000/signals/AAPL
+curl http://localhost:8000/backtests/AAPL
+curl http://localhost:8000/account/reconciliation
+curl http://localhost:8000/risk
 ```
 
-Set `MARKET_DATA_PROVIDER=finnhub` and put the API key in the ignored `.env` to use Finnhub instead of Yahoo Finance. Keep `.env` local; it is excluded by `.gitignore`. `.env.example` contains names and safe defaults only.
+The daily history API supports `MARKET_DATA_PROVIDER=yfinance` (default) or `finnhub` with `FINNHUB_API_KEY`. Intraday WebSocket ingestion uses Alpaca and `ALPACA_DATA_FEED=iex` by default. Market-data entitlements and availability depend on the selected provider and plan.
 
-## Alpaca paper trading
-
-Create paper-trading API credentials in Alpaca and set `ALPACA_API_KEY` and `ALPACA_SECRET_KEY`. Keep `ALPACA_PAPER=true`. Order submission remains disabled until `TRADING_ENABLED=true`. Once enabled, `POST /paper/orders` can submit manually requested market orders to Alpaca's paper account; the endpoint limits quantity to 100 shares and does not size an order based on risk or portfolio equity. Do not expose this unauthenticated endpoint to an untrusted network.
-
-Example request (will be rejected while the default disabled setting is in effect):
-
-```sh
-curl -X POST http://localhost:8000/paper/orders \
-  -H 'Content-Type: application/json' \
-  -d '{"symbol":"AAPL","qty":1,"side":"buy"}'
-```
-
-There is deliberately no live trading base URL or live trading switch in this starter.
-
-## Docker
+## Docker image
 
 ```sh
 docker build -t kube-trader:latest .
 docker run --rm -p 8000:8000 --env-file .env -v kube-trader-data:/data kube-trader:latest
 ```
 
+The API container needs PostgreSQL and Redis for the account, risk, and backtest endpoints. Use Compose for the whole stack.
+
 ## Kubernetes manifests
 
-Build and publish the image, then replace `kube-trader:latest` in `k8s/app.yaml` with your image reference. Create a secret in the target cluster (do not commit it):
-
-```sh
-kubectl create namespace kube-trader
-kubectl -n kube-trader create secret generic kube-trader-secrets \
-  --from-literal=FINNHUB_API_KEY='...' \
-  --from-literal=ALPACA_API_KEY='...' \
-  --from-literal=ALPACA_SECRET_KEY='...'
-kubectl apply -f k8s/app.yaml
-```
-
-The namespace is also defined in `k8s/namespace.yaml`; apply that first if you have not already created the namespace:
+Build/publish the image and replace each `kube-trader:latest` in `k8s/app.yaml` with the registry image. Create the namespace and secret first. Never commit the secret:
 
 ```sh
 kubectl apply -f k8s/namespace.yaml
+kubectl -n kube-trader create secret generic kube-trader-secrets \
+  --from-literal=POSTGRES_PASSWORD='REPLACE_WITH_A_RANDOM_PASSWORD' \
+  --from-literal=POSTGRES_DSN='postgresql://kube_trader:REPLACE_WITH_A_RANDOM_PASSWORD@postgres:5432/kube_trader' \
+  --from-literal=ALPACA_API_KEY='' \
+  --from-literal=ALPACA_SECRET_KEY='' \
+  --from-literal=FINNHUB_API_KEY='' \
+  --from-literal=ALERT_WEBHOOK_URL=''
+kubectl apply -f k8s/platform.yaml -f k8s/app.yaml
 ```
 
-If using Yahoo Finance, the Finnhub secret value can be omitted. Kubernetes secret values are still sensitive; use your cluster's secret-management integration for shared or production clusters.
+Update both Postgres password and DSN using the same password. After adding credentials or changing ConfigMap values, restart the affected deployments so the pods receive the new environment. Use a cluster secret manager for real credentials. The API service is `ClusterIP`; expose it only through a private, authenticated path. SQLite's API history cache is a separate 2 GiB PVC. PostgreSQL and Redis each use persistent volumes.
 
 ## Helm
+
+Prepare the `kube-trader-secrets` Secret in the release namespace with the same keys. Set `POSTGRES_DSN` to use the release's Postgres service name (for release `kube-trader`, that is `kube-trader-postgres`). Then install:
 
 ```sh
 helm upgrade --install kube-trader ./helm/kube-trader \
@@ -84,21 +100,27 @@ helm upgrade --install kube-trader ./helm/kube-trader \
   --set image.tag=YOUR_TAG
 ```
 
-Create `kube-trader-secrets` in the release namespace before installing if API keys are needed. Configuration is in `helm/kube-trader/values.yaml`. The PVC requests 2 GiB by default; set a storage class if the cluster does not have a default.
-
-The service is `ClusterIP` and no ingress is installed. Use an authenticated gateway or a private port-forward for access. SQLite with a `ReadWriteOnce` PVC is intended for a single replica; do not scale replicas without replacing the storage and coordination design.
+The chart defaults all stream/execution switches to off. To enable after setting up Alpaca **paper** credentials, set `config.marketStreamEnabled=true`, `config.executionEnabled=true`, and `config.stopManagementEnabled=true`. Keep `ALPACA_PAPER=true`. Use `helm/kube-trader/values.yaml` for worker limits and PVC sizes.
 
 ## Configuration
 
 | Variable | Default | Purpose |
 | --- | --- | --- |
-| `MARKET_DATA_PROVIDER` | `yfinance` | `yfinance` or `finnhub` |
-| `FINNHUB_API_KEY` | empty | Required for Finnhub daily candles |
-| `ALPACA_API_KEY` | empty | Alpaca paper API key |
-| `ALPACA_SECRET_KEY` | empty | Alpaca paper secret |
-| `ALPACA_PAPER` | `true` | Guard; false causes paper order requests to be rejected |
-| `TRADING_ENABLED` | `false` | Enables the manual paper-order endpoint when true |
-| `DATABASE_PATH` | `/data/market.db` | SQLite file for retrieved daily bars |
-| `DEFAULT_SYMBOLS` | `AAPL,MSFT,SPY` | Returned by `/symbols` |
-| `LOG_LEVEL` | `INFO` | Reserved for deployment logging configuration |
+| `MARKET_DATA_PROVIDER` | `yfinance` | Daily history API source: `yfinance` or `finnhub` |
+| `FINNHUB_API_KEY` | empty | Finnhub history API key |
+| `ALPACA_API_KEY`, `ALPACA_SECRET_KEY` | empty | Alpaca paper credentials for streaming and account API |
+| `ALPACA_PAPER` | `true` | Any value other than true stops the execution worker |
+| `ALPACA_DATA_FEED` | `iex` | Alpaca stock feed (`iex` or `sip`, subject to entitlements) |
+| `MARKET_STREAM_ENABLED` | `false` | Starts the Alpaca minute-bar WebSocket consumer |
+| `EXECUTION_ENABLED` | `false` | Enables automated paper entries/exits |
+| `STOP_MANAGEMENT_ENABLED` | `false` | Repairs missing stops on bot-managed positions |
+| `MAX_TRADE_RISK_PCT` | `0.01` | Maximum account-equity loss budget per entry |
+| `DAILY_DRAWDOWN_LIMIT_PCT` | `0.03` | Entry halt threshold for the current New York date |
+| `STOP_LOSS_PCT` / `TAKE_PROFIT_PCT` | `0.02` / `0.04` | Default bracket exit distances |
+| `INTRADAY_ALLOCATION_PCT` / `SWING_ALLOCATION_PCT` / `CORE_ALLOCATION_PCT` | `0.20` / `0.30` / `0.50` | Virtual portfolio pool targets; must sum to 1.0 |
+| `SIGNAL_FAST_BARS` / `SIGNAL_SLOW_BARS` | `5` / `20` | SMA periods, in minute bars |
+| `RECONCILE_INTERVAL_SECONDS` | `30` | Brokerage reconciliation interval |
+| `MAX_SIGNAL_AGE_SECONDS` | `180` | Reject older or future-dated signals |
+| `ALERT_WEBHOOK_URL` | empty | Optional generic JSON circuit-breaker webhook receiver |
+| `POSTGRES_DSN` / `REDIS_URL` | local defaults | Database and stream-broker connection strings |
 

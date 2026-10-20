@@ -29,7 +29,6 @@ spec:
                 name: {{ include "kube-trader.fullname" . }}
             - secretRef:
                 name: {{ .Values.secrets.existingSecret }}
-                optional: true
           volumeMounts:
             - name: data
               mountPath: /data

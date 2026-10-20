@@ -1,9 +1,10 @@
 from datetime import datetime, timezone
 
 from fastapi import FastAPI, HTTPException, Query
-from pydantic import BaseModel, Field
+from pydantic import BaseModel
 
 from app.market_data import get_daily_bars
+from app.database import connect, get_risk_state, latest_account_snapshot, latest_backtest
 from app.settings import get_settings
 from app.storage import store_bars
 
@@ -28,7 +29,12 @@ def healthz():
 
 @app.get("/readyz")
 def readyz():
-    return {"status": "ready", "provider": settings.market_data_provider}
+    try:
+        with connect() as db:
+            db.execute("SELECT 1")
+        return {"status": "ready", "provider": settings.market_data_provider}
+    except Exception as exc:
+        raise HTTPException(status_code=503, detail="PostgreSQL is unavailable") from exc
 
 
 @app.get("/symbols")
@@ -65,33 +71,42 @@ def signal(symbol: str):
         raise HTTPException(status_code=502, detail=str(exc)) from exc
 
 
-class PaperOrderRequest(BaseModel):
-    symbol: str = Field(pattern=r"^[A-Z.]{1,10}$")
-    qty: float = Field(gt=0, le=100)
-    side: str = Field(pattern=r"^(buy|sell)$")
-
-
-@app.post("/paper/orders")
-def submit_paper_order(order: PaperOrderRequest):
-    """Manual paper order only; disabled by default."""
-    if not settings.trading_enabled:
-        raise HTTPException(status_code=403, detail="Paper order submission is disabled")
-    if not settings.alpaca_paper:
-        raise HTTPException(status_code=403, detail="Only Alpaca paper trading is supported")
-    if not settings.alpaca_api_key or not settings.alpaca_secret_key:
-        raise HTTPException(status_code=503, detail="Alpaca paper API credentials are not configured")
+@app.get("/backtests/{symbol}")
+def backtest_metrics(symbol: str):
     try:
-        from alpaca.trading.client import TradingClient
-        from alpaca.trading.enums import OrderSide, TimeInForce
-        from alpaca.trading.requests import MarketOrderRequest
-
-        client = TradingClient(settings.alpaca_api_key, settings.alpaca_secret_key, paper=True)
-        result = client.submit_order(MarketOrderRequest(
-            symbol=order.symbol, qty=order.qty,
-            side=OrderSide.BUY if order.side == "buy" else OrderSide.SELL,
-            time_in_force=TimeInForce.DAY,
-        ))
-        return {"id": str(result.id), "status": str(result.status), "paper": True}
+        result = latest_backtest(symbol.upper())
+        if result is None:
+            raise HTTPException(status_code=404, detail="No rolling backtest metrics available yet")
+        return result
+    except HTTPException:
+        raise
     except Exception as exc:
-        raise HTTPException(status_code=502, detail=f"Alpaca paper order failed: {exc}") from exc
+        raise HTTPException(status_code=503, detail="Backtest database is unavailable") from exc
+
+
+@app.get("/account/reconciliation")
+def account_reconciliation():
+    try:
+        result = latest_account_snapshot()
+        if result is None:
+            raise HTTPException(status_code=404, detail="No broker reconciliation has run yet")
+        return result
+    except HTTPException:
+        raise
+    except Exception as exc:
+        raise HTTPException(status_code=503, detail="Account database is unavailable") from exc
+
+
+@app.get("/risk")
+def risk_status():
+    try:
+        from zoneinfo import ZoneInfo
+
+        today = datetime.now(ZoneInfo("America/New_York")).date()
+        result = get_risk_state(today)
+        if result is None:
+            return {"halted": False, "status": "no broker snapshot yet"}
+        return result
+    except Exception as exc:
+        raise HTTPException(status_code=503, detail="Risk database is unavailable") from exc
 

@@ -8,12 +8,32 @@ service:
   port: 80
 config:
   marketDataProvider: yfinance
-  tradingEnabled: false
+  marketStreamEnabled: false
+  executionEnabled: false
+  stopManagementEnabled: false
+  alpacaDataFeed: iex
   defaultSymbols: AAPL,MSFT,SPY
+  maxTradeRiskPct: "0.01"
+  dailyDrawdownLimitPct: "0.03"
+  stopLossPct: "0.02"
+  takeProfitPct: "0.04"
+  intradayAllocationPct: "0.20"
+  swingAllocationPct: "0.30"
+  coreAllocationPct: "0.50"
+  signalFastBars: "5"
+  signalSlowBars: "20"
+  reconcileIntervalSeconds: "30"
+  maxSignalAgeSeconds: "180"
 persistence:
   enabled: true
   size: 2Gi
   storageClass: ""
+postgres:
+  image: postgres:16-alpine
+  storage: 10Gi
+redis:
+  image: redis:7-alpine
+  storage: 2Gi
 secrets:
   existingSecret: kube-trader-secrets
 resources:

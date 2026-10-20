@@ -1,0 +1,31 @@
+{{- $root := . }}
+{{- range $worker := list "ingestion" "signals" "backtesting" "execution" }}
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "kube-trader.fullname" $root }}-{{ $worker }}
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: {{ include "kube-trader.fullname" $root }}-{{ $worker }}
+  template:
+    metadata:
+      labels:
+        app: {{ include "kube-trader.fullname" $root }}-{{ $worker }}
+    spec:
+      containers:
+        - name: {{ $worker }}
+          image: "{{ $root.Values.image.repository }}:{{ $root.Values.image.tag }}"
+          imagePullPolicy: {{ $root.Values.image.pullPolicy }}
+          command: [python, -m, app.services.{{ $worker }}]
+          envFrom:
+            - configMapRef:
+                name: {{ include "kube-trader.fullname" $root }}
+            - secretRef:
+                name: {{ $root.Values.secrets.existingSecret }}
+          resources:
+            {{- toYaml $root.Values.resources | nindent 12 }}
+{{- end }}
+

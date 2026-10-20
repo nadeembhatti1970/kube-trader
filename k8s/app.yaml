@@ -4,17 +4,32 @@ metadata:
   name: kube-trader-config
   namespace: kube-trader
 data:
-  MARKET_DATA_PROVIDER: yfinance
   ALPACA_PAPER: "true"
-  TRADING_ENABLED: "false"
+  ALPACA_DATA_FEED: iex
+  MARKET_DATA_PROVIDER: yfinance
+  MARKET_STREAM_ENABLED: "false"
+  EXECUTION_ENABLED: "false"
+  STOP_MANAGEMENT_ENABLED: "false"
+  REDIS_URL: redis://redis:6379/0
   DATABASE_PATH: /data/market.db
   DEFAULT_SYMBOLS: AAPL,MSFT,SPY
+  MAX_TRADE_RISK_PCT: "0.01"
+  DAILY_DRAWDOWN_LIMIT_PCT: "0.03"
+  STOP_LOSS_PCT: "0.02"
+  TAKE_PROFIT_PCT: "0.04"
+  INTRADAY_ALLOCATION_PCT: "0.20"
+  SWING_ALLOCATION_PCT: "0.30"
+  CORE_ALLOCATION_PCT: "0.50"
+  SIGNAL_FAST_BARS: "5"
+  SIGNAL_SLOW_BARS: "20"
+  RECONCILE_INTERVAL_SECONDS: "30"
+  MAX_SIGNAL_AGE_SECONDS: "180"
   LOG_LEVEL: INFO
 ---
 apiVersion: v1
 kind: PersistentVolumeClaim
 metadata:
-  name: kube-trader-data
+  name: kube-trader-api-data
   namespace: kube-trader
 spec:
   accessModes: [ReadWriteOnce]
@@ -25,17 +40,17 @@ spec:
 apiVersion: apps/v1
 kind: Deployment
 metadata:
-  name: kube-trader
+  name: kube-trader-api
   namespace: kube-trader
 spec:
   replicas: 1
   selector:
     matchLabels:
-      app: kube-trader
+      app: kube-trader-api
   template:
     metadata:
       labels:
-        app: kube-trader
+        app: kube-trader-api
     spec:
       securityContext:
         runAsNonRoot: true
@@ -54,7 +69,6 @@ spec:
                 name: kube-trader-config
             - secretRef:
                 name: kube-trader-secrets
-                optional: true
           volumeMounts:
             - name: data
               mountPath: /data
@@ -62,21 +76,13 @@ spec:
             httpGet:
               path: /readyz
               port: http
-            initialDelaySeconds: 5
-            periodSeconds: 10
           livenessProbe:
             httpGet:
               path: /healthz
               port: http
-            initialDelaySeconds: 10
-            periodSeconds: 20
           resources:
-            requests:
-              cpu: 100m
-              memory: 256Mi
-            limits:
-              cpu: 1
-              memory: 1Gi
+            requests: {cpu: 100m, memory: 256Mi}
+            limits: {cpu: "1", memory: 1Gi}
           securityContext:
             allowPrivilegeEscalation: false
             readOnlyRootFilesystem: true
@@ -85,19 +91,115 @@ spec:
       volumes:
         - name: data
           persistentVolumeClaim:
-            claimName: kube-trader-data
+            claimName: kube-trader-api-data
 ---
 apiVersion: v1
 kind: Service
 metadata:
-  name: kube-trader
+  name: kube-trader-api
   namespace: kube-trader
 spec:
   selector:
-    app: kube-trader
+    app: kube-trader-api
   ports:
     - name: http
       port: 80
       targetPort: http
   type: ClusterIP
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: kube-trader-ingestion
+  namespace: kube-trader
+spec:
+  replicas: 1
+  selector:
+    matchLabels: {app: kube-trader-ingestion}
+  template:
+    metadata:
+      labels: {app: kube-trader-ingestion}
+    spec:
+      containers:
+        - name: ingestion
+          image: kube-trader:latest
+          command: [python, -m, app.services.ingestion]
+          envFrom:
+            - configMapRef: {name: kube-trader-config}
+            - secretRef: {name: kube-trader-secrets}
+          resources:
+            requests: {cpu: 100m, memory: 256Mi}
+            limits: {cpu: "1", memory: 1Gi}
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: kube-trader-signals
+  namespace: kube-trader
+spec:
+  replicas: 1
+  selector:
+    matchLabels: {app: kube-trader-signals}
+  template:
+    metadata:
+      labels: {app: kube-trader-signals}
+    spec:
+      containers:
+        - name: signals
+          image: kube-trader:latest
+          command: [python, -m, app.services.signals]
+          envFrom:
+            - configMapRef: {name: kube-trader-config}
+            - secretRef: {name: kube-trader-secrets}
+          resources:
+            requests: {cpu: 100m, memory: 256Mi}
+            limits: {cpu: "1", memory: 1Gi}
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: kube-trader-backtesting
+  namespace: kube-trader
+spec:
+  replicas: 1
+  selector:
+    matchLabels: {app: kube-trader-backtesting}
+  template:
+    metadata:
+      labels: {app: kube-trader-backtesting}
+    spec:
+      containers:
+        - name: backtesting
+          image: kube-trader:latest
+          command: [python, -m, app.services.backtesting]
+          envFrom:
+            - configMapRef: {name: kube-trader-config}
+            - secretRef: {name: kube-trader-secrets}
+          resources:
+            requests: {cpu: 100m, memory: 256Mi}
+            limits: {cpu: "1", memory: 1Gi}
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: kube-trader-execution
+  namespace: kube-trader
+spec:
+  replicas: 1
+  selector:
+    matchLabels: {app: kube-trader-execution}
+  template:
+    metadata:
+      labels: {app: kube-trader-execution}
+    spec:
+      containers:
+        - name: execution
+          image: kube-trader:latest
+          command: [python, -m, app.services.execution]
+          envFrom:
+            - configMapRef: {name: kube-trader-config}
+            - secretRef: {name: kube-trader-secrets}
+          resources:
+            requests: {cpu: 100m, memory: 256Mi}
+            limits: {cpu: "1", memory: 1Gi}
 

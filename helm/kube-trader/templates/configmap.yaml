@@ -5,7 +5,22 @@ metadata:
 data:
   MARKET_DATA_PROVIDER: {{ .Values.config.marketDataProvider | quote }}
   ALPACA_PAPER: "true"
-  TRADING_ENABLED: {{ .Values.config.tradingEnabled | quote }}
+  ALPACA_DATA_FEED: {{ .Values.config.alpacaDataFeed | quote }}
+  MARKET_STREAM_ENABLED: {{ .Values.config.marketStreamEnabled | quote }}
+  EXECUTION_ENABLED: {{ .Values.config.executionEnabled | quote }}
+  STOP_MANAGEMENT_ENABLED: {{ .Values.config.stopManagementEnabled | quote }}
+  REDIS_URL: redis://{{ include "kube-trader.fullname" . }}-redis:6379/0
+  MAX_TRADE_RISK_PCT: {{ .Values.config.maxTradeRiskPct | quote }}
+  DAILY_DRAWDOWN_LIMIT_PCT: {{ .Values.config.dailyDrawdownLimitPct | quote }}
+  STOP_LOSS_PCT: {{ .Values.config.stopLossPct | quote }}
+  TAKE_PROFIT_PCT: {{ .Values.config.takeProfitPct | quote }}
+  INTRADAY_ALLOCATION_PCT: {{ .Values.config.intradayAllocationPct | quote }}
+  SWING_ALLOCATION_PCT: {{ .Values.config.swingAllocationPct | quote }}
+  CORE_ALLOCATION_PCT: {{ .Values.config.coreAllocationPct | quote }}
+  SIGNAL_FAST_BARS: {{ .Values.config.signalFastBars | quote }}
+  SIGNAL_SLOW_BARS: {{ .Values.config.signalSlowBars | quote }}
+  RECONCILE_INTERVAL_SECONDS: {{ .Values.config.reconcileIntervalSeconds | quote }}
+  MAX_SIGNAL_AGE_SECONDS: {{ .Values.config.maxSignalAgeSeconds | quote }}
   DATABASE_PATH: /data/market.db
   DEFAULT_SYMBOLS: {{ .Values.config.defaultSymbols | quote }}
   LOG_LEVEL: INFO

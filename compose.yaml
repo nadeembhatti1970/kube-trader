@@ -1,0 +1,65 @@
+name: kube-trader
+
+x-app-common: &app-common
+  build: .
+  image: kube-trader:local
+  env_file: .env
+  environment:
+    ALPACA_PAPER: "true"
+    POSTGRES_DSN: postgresql://kube_trader:${POSTGRES_PASSWORD:-change-me}@postgres:5432/kube_trader
+    REDIS_URL: redis://redis:6379/0
+  depends_on:
+    postgres:
+      condition: service_healthy
+    redis:
+      condition: service_healthy
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_DB: kube_trader
+      POSTGRES_USER: kube_trader
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-change-me}
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+    healthcheck:
+      test: [CMD-SHELL, pg_isready -U kube_trader -d kube_trader]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+  redis:
+    image: redis:7-alpine
+    command: [redis-server, --appendonly, "yes"]
+    volumes:
+      - redis-data:/data
+    healthcheck:
+      test: [CMD, redis-cli, ping]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+  api:
+    <<: *app-common
+    command: [uvicorn, app.main:app, --host, 0.0.0.0, --port, "8000"]
+    ports:
+      - 8000:8000
+    volumes:
+      - api-data:/data
+  ingestion:
+    <<: *app-common
+    command: [python, -m, app.services.ingestion]
+  signals:
+    <<: *app-common
+    command: [python, -m, app.services.signals]
+  backtesting:
+    <<: *app-common
+    command: [python, -m, app.services.backtesting]
+  execution:
+    <<: *app-common
+    command: [python, -m, app.services.execution]
+
+volumes:
+  postgres-data:
+  redis-data:
+  api-data:
+
