@@ -5,7 +5,9 @@ Kube Trader is an open-source Python starter for a self-hosted stock research an
 ## Pipeline
 
 ```text
-Alpaca minute bars ──► Redis stream ──► Signals/alpha factors ──► Redis stream ──► Paper/live execution
+Alpaca minute bars ──► Redis stream ──► Intraday signals ───────┐
+                                                                ├──► Redis stream ──► Paper/live execution
+Daily bars (yfinance/Finnhub) ──────────► Swing/core signals ──┘
         │                        │                 │                                  │
         └──────────────► PostgreSQL ◄─────────────┴──── Rolling backtest metrics ────┘
                                                                                       │
@@ -15,9 +17,9 @@ Alpaca minute bars ──► Redis stream ──► Signals/alpha factors ──
 | Worker | Container command | Responsibility |
 | --- | --- | --- |
 | Ingestion | `python -m app.services.ingestion` | Alpaca IEX/SIP minute bars to PostgreSQL and the `market.bars` Redis stream |
-| Signals | `python -m app.services.signals` | 5/20-bar SMA state changes, RSI(14), and `buy`/`sell` events in `strategy.signals` |
+| Signals | `python -m app.services.signals` | Intraday 5/20-minute SMA, daily swing 20-SMA, daily core 50/200-SMA, and RSI(14) events in `strategy.signals` |
 | Backtesting | `python -m app.services.backtesting` | Recalculates rolling 500-bar SMA returns, max drawdown, and per-bar Sharpe metric |
-| Execution | `python -m app.services.execution` | Reconciles account/positions, enforces limits, and submits paper/live bracket orders on the selected endpoint |
+| Execution | `python -m app.services.execution` | Reconciles account/positions, enforces limits, and submits paper/live bracket or OTO protective-stop orders |
 
 FastAPI remains a separate API pod. Redis Streams carry events; PostgreSQL stores bars, strategy state, backtest metrics, account snapshots, allocation exposures, order reservations, and the daily risk state. The raw Kubernetes setup includes single-instance PostgreSQL and Redis StatefulSets with PVCs. The Helm chart deploys the same components.
 
@@ -25,14 +27,14 @@ FastAPI remains a separate API pod. Redis Streams carry events; PostgreSQL store
 
 - **Endpoint selection:** `ALPACA_PAPER=true` selects Alpaca paper trading; `ALPACA_PAPER=false` selects the live brokerage endpoint. The same execution logic and risk checks apply to either endpoint. Use credentials for the selected endpoint.
 - **Opt-in automation:** market streaming, automated order execution, and stop repair default off. For paper automation, set valid paper credentials and set `MARKET_STREAM_ENABLED=true`, `EXECUTION_ENABLED=true`, and `STOP_MANAGEMENT_ENABLED=true` after reviewing the behavior. Live trading additionally requires deliberately setting `ALPACA_PAPER=false` and supplying live credentials; keep `.env` out of Git.
-- **Signal policy:** the sample strategy is a 5/20 minute-bar SMA state change with RSI included as an observable factor; RSI is not currently used as a trade filter. Entries are long-only; `below_sma` exits bot-managed long positions. It ignores stale signals and entries while the US market is closed.
-- **Per-trade risk:** whole-share quantity is bounded by 1% of account equity divided by the configured stop distance. New entries receive Alpaca bracket orders with a stop loss and take-profit target. The default stop is 2%; the target is 4%.
-- **Allocation:** default virtual pool targets are 20% intraday, 30% swing, and 50% core. Each new entry is limited to the remaining budget of its pool. This signal worker currently emits intraday signals only; swing and core budgets are tracked for allocation reporting, but do not receive generated strategies.
+- **Signal policy:** intraday uses 5/20-minute SMA state changes; swing enters when a completed daily close crosses above its 20-day SMA and exits below it; core enters on a 50/200-day golden cross and exits on a death cross. Daily bars come from `MARKET_DATA_PROVIDER` and the current unfinished daily bar is excluded. Signals are emitted once per completed daily bar. RSI is included as an observable factor for intraday signals and is not a trade filter. All strategies are long-only and reject stale signals and entries while the US market is closed.
+- **Per-trade risk:** whole-share quantity is bounded by 1% of account equity divided by the configured stop distance. Intraday entries use day bracket orders with the default 2% stop and 4% target. Swing entries use a GTC protective stop at 2x daily ATR by default, without a fixed take-profit; core entries use a GTC protective stop defaulting to 20%, without a fixed take-profit. Swing/core exits also follow their daily trend rules.
+- **Allocation:** default virtual pool targets are 20% intraday, 30% swing, and 50% core. Each new entry is limited by the remaining budget of its pool. The pools remain virtual partitions in one brokerage account; they do not transfer cash or automatically rebalance positions.
 - **Drawdown breaker:** the worker uses Alpaca's same-day portfolio history for its New York session baseline, falling back to the account's previous-close equity if history is unavailable. A 3% or greater drop persists a halt for new entries until the next date and logs a critical event. If `ALERT_WEBHOOK_URL` is configured, it posts a generic JSON alert to that receiver. Existing bracket exits remain at the broker. It does not liquidate positions.
 - **Reconciliation:** every 30 seconds the worker snapshots Alpaca equity, buying power, positions, tracked/untracked symbols, allocation exposure, and missing protective stops. When stop management is enabled, it restores stops for bot-managed positions only. Review `/account/reconciliation` and `/risk`.
 - **Duplicate protection:** entry reservations use deterministic Alpaca client order IDs and a PostgreSQL uniqueness constraint. Redis events are acknowledged after processing.
 
-This is a starter implementation, not a validated strategy or a production brokerage platform. The rolling backtest omits fees, slippage, survivorship bias, corporate actions, and out-of-sample validation. It does not short securities, stream Finnhub data, execute intraday account cash transfers, or send alerts outside container logs. An attached stop order cannot guarantee a fill price. Start with paper credentials and inspect orders, account state, and market-data terms before relying on the system.
+This is a starter implementation, not a validated strategy or a production brokerage platform. The rolling backtest covers only the intraday SMA strategy and omits fees, slippage, survivorship bias, corporate actions, and out-of-sample validation; swing and core rules have not been backtested by this worker. It does not short securities, stream Finnhub data, execute intraday account cash transfers, or send alerts outside configured webhooks/container logs. Stop orders cannot guarantee a fill price. Start with paper credentials and inspect orders, account state, and market-data terms before relying on the system.
 
 ## Local setup
 
@@ -119,6 +121,8 @@ The chart defaults to paper mode and all stream/execution switches to off. To en
 | `STOP_LOSS_PCT` / `TAKE_PROFIT_PCT` | `0.02` / `0.04` | Default bracket exit distances |
 | `INTRADAY_ALLOCATION_PCT` / `SWING_ALLOCATION_PCT` / `CORE_ALLOCATION_PCT` | `0.20` / `0.30` / `0.50` | Virtual portfolio pool targets; must sum to 1.0 |
 | `SIGNAL_FAST_BARS` / `SIGNAL_SLOW_BARS` | `5` / `20` | SMA periods, in minute bars |
+| `SWING_ATR_PERIOD` / `SWING_ATR_MULTIPLE` | `14` / `2.0` | Daily ATR stop distance for swing orders |
+| `CORE_STOP_LOSS_PCT` | `0.20` | Core GTC protective stop distance (20% default) |
 | `RECONCILE_INTERVAL_SECONDS` | `30` | Brokerage reconciliation interval |
 | `MAX_SIGNAL_AGE_SECONDS` | `180` | Reject older or future-dated signals |
 | `ALERT_WEBHOOK_URL` | empty | Optional generic JSON circuit-breaker webhook receiver |

@@ -14,9 +14,9 @@ Paper trading is the default. Setting `ALPACA_PAPER=false` selects live trading 
 | Stage | Entry point | Input/output |
 | --- | --- | --- |
 | Ingestion | `python -m app.services.ingestion` | Alpaca minute-bar WebSocket to PostgreSQL and Redis stream `market.bars` |
-| Signals and alpha factors | `python -m app.services.signals` | 5/20-bar SMA state changes and RSI(14); emits `buy`/`sell` events to `strategy.signals` |
+| Signals and alpha factors | `python -m app.services.signals` | 5/20-minute intraday SMA, daily swing 20-SMA, daily core 50/200-SMA, and RSI(14); emits events to `strategy.signals` |
 | Backtesting and risk metrics | `python -m app.services.backtesting` | Rolling 500-bar sample metrics: cumulative return, maximum drawdown, per-bar Sharpe |
-| Execution and automation | `python -m app.services.execution` | Account reconciliation, pool and risk checks, optional Alpaca paper/live bracket orders |
+| Execution and automation | `python -m app.services.execution` | Account reconciliation, pool/risk checks, intraday brackets and swing/core OTO protective-stop orders |
 
 FastAPI is a separate service. Redis Streams decouple worker events; PostgreSQL persists bars, strategy state, metrics, reservations, account snapshots, allocation exposure, and daily risk state. The API's daily history cache uses SQLite on `/data`.
 
@@ -39,6 +39,8 @@ Alpaca's `StockDataStream` supplies minute bars. The configured feed defaults to
 | `SWING_ALLOCATION_PCT` | `0.30` | Swing virtual pool target |
 | `CORE_ALLOCATION_PCT` | `0.50` | Core virtual pool target |
 | `SIGNAL_FAST_BARS` / `SIGNAL_SLOW_BARS` | `5` / `20` | SMA periods measured in minute bars |
+| `SWING_ATR_PERIOD` / `SWING_ATR_MULTIPLE` | `14` / `2.0` | Daily ATR period and stop multiple for swing orders |
+| `CORE_STOP_LOSS_PCT` | `0.20` | Core GTC protective stop distance |
 | `MAX_SIGNAL_AGE_SECONDS` | `180` | Maximum signal age accepted by execution |
 | `RECONCILE_INTERVAL_SECONDS` | `30` | Account and position reconciliation interval |
 | `ALERT_WEBHOOK_URL` | empty | Optional receiver for generic JSON breaker alerts |
@@ -48,9 +50,11 @@ The three allocation percentages must be nonnegative and sum to `1.0`. Never com
 
 ## Signal and backtest behavior
 
-For each symbol, the signal worker reads recent closes from PostgreSQL, compares the fast and slow SMAs, and stores the current above/below state. On a state change it publishes the symbol, action, pool, bar price/time, SMA values, RSI(14), and bracket percentages. RSI is informational and does not currently filter orders.
+For intraday signals, the worker reads recent minute closes from PostgreSQL, compares the fast and slow SMAs, and stores the current above/below state. On a state change it publishes action, pool, price/time, SMA values, RSI(14), and bracket percentages.
 
-The backtesting worker recalculates a rolling SMA simulation over up to 500 recent bars whenever a new bar arrives. Its Sharpe value is a per-bar ratio, not annualized. Results do not include fees, slippage, corporate actions, or out-of-sample validation and must not be treated as a production evaluation.
+For daily strategies, it fetches daily bars using `MARKET_DATA_PROVIDER`, excludes the current unfinished session bar, and caches the result during the New York trading date. Swing enters on a completed close crossing above the 20-day SMA and exits on a cross below; its protective stop defaults to 2x 14-day ATR. Core enters when the 50-day SMA crosses above the 200-day SMA and exits on the reverse cross; its protective stop defaults to 20%. Daily crossover state is persisted per symbol/pool/bar date, so repeated minute events do not duplicate daily signals. RSI remains informational and does not filter orders.
+
+The backtesting worker recalculates only the intraday SMA simulation over up to 500 recent minute bars whenever a new bar arrives. It does not evaluate swing/core rules. Its Sharpe value is a per-bar ratio, not annualized. Results do not include fees, slippage, corporate actions, or out-of-sample validation and must not be treated as a production evaluation.
 
 ## Allocation and order sizing
 
@@ -60,9 +64,9 @@ Each pool's target equity is `account_equity * target_ratio`. Broker position ma
 2. the pool's remaining target budget and broker buying power; and
 3. a 100-share per-order ceiling.
 
-Only intraday signals are generated today. Swing and core budgets are reported but have no active signal strategies. Pool balances are virtual limits inside one brokerage account: the application does not transfer cash between accounts or automatically sell holdings to rebalance pool ratios.
+All three pools generate signals. Intraday entries use day bracket orders with default 2% stop and 4% take-profit. Swing and core entries use GTC OTO orders with a single protective stop and no fixed take-profit; their daily trend exits close the bot-managed pool position after canceling its attached exit order. The 20/30/50 pool balances are virtual limits inside one brokerage account: the application does not transfer cash between accounts or automatically sell holdings to rebalance pool ratios.
 
-Buy signals submit long-only Alpaca market bracket orders on the selected endpoint, with a stop-loss and take-profit child order. The execution worker ignores stale/future signals and will not enter when the US equity market is closed. A below-SMA signal closes a bot-managed position unless the daily breaker is active; existing broker-side bracket exits remain in place.
+Intraday buy signals submit long-only Alpaca market bracket orders on the selected endpoint, with stop-loss and take-profit child orders. Swing/core buys submit GTC OTO market orders with one protective stop and no fixed take-profit. The execution worker ignores stale/future signals and will not enter when the US equity market is closed. A matching pool's trend exit cancels its open protective closing leg and closes the bot-managed position. The daily breaker blocks new entries but still allows strategy exits.
 
 ## Reconciliation and circuit breaker
 

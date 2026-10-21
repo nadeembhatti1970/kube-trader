@@ -19,6 +19,9 @@ data:
   CORE_ALLOCATION_PCT: {{ .Values.config.coreAllocationPct | quote }}
   SIGNAL_FAST_BARS: {{ .Values.config.signalFastBars | quote }}
   SIGNAL_SLOW_BARS: {{ .Values.config.signalSlowBars | quote }}
+  SWING_ATR_PERIOD: {{ .Values.config.swingAtrPeriod | quote }}
+  SWING_ATR_MULTIPLE: {{ .Values.config.swingAtrMultiple | quote }}
+  CORE_STOP_LOSS_PCT: {{ .Values.config.coreStopLossPct | quote }}
   RECONCILE_INTERVAL_SECONDS: {{ .Values.config.reconcileIntervalSeconds | quote }}
   MAX_SIGNAL_AGE_SECONDS: {{ .Values.config.maxSignalAgeSeconds | quote }}
   DATABASE_PATH: /data/market.db

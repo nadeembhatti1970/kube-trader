@@ -14,8 +14,9 @@ from alpaca.trading.requests import (GetOrdersRequest, MarketOrderRequest, StopL
                                      GetPortfolioHistoryRequest, StopOrderRequest,
                                      TakeProfitRequest)
 
-from app.database import (get_risk_state, init_db, managed_pool_assignments, managed_symbols, reserve_order,
-                          save_account_snapshot, save_risk_state, update_order)
+from app.database import (get_risk_state, init_db, managed_order_id, managed_pool_assignments,
+                          managed_symbols, reserve_order, save_account_snapshot,
+                          save_risk_state, update_order)
 from app.settings import get_settings
 from app.streams import SIGNAL_STREAM, client, ensure_group, read_group
 
@@ -35,6 +36,28 @@ def order_tree(order):
     yield order
     for leg in getattr(order, "legs", None) or []:
         yield from order_tree(leg)
+
+
+def close_managed_position(client_api: TradingClient, symbol: str, pool: str, positions):
+    """Cancel attached exit legs before closing so a protective order cannot oversell."""
+    position = next((item for item in positions if item.symbol == symbol), None)
+    if position is None:
+        return
+    closing_side = OrderSide.SELL if float(position.qty) > 0 else OrderSide.BUY
+    entry_order_id = managed_order_id(symbol, pool)
+    if entry_order_id:
+        entry_order = client_api.get_order_by_id(entry_order_id)
+        for item in order_tree(entry_order):
+            raw_side = getattr(item, "side", "")
+            side = str(getattr(raw_side, "value", raw_side)).lower()
+            status = str(getattr(getattr(item, "status", ""), "value",
+                                 getattr(item, "status", ""))).lower()
+            if (getattr(item, "id", None) != entry_order.id
+                    and getattr(item, "symbol", None) == symbol
+                    and side == closing_side.value
+                    and status in {"new", "accepted", "pending_new", "partially_filled"}):
+                client_api.cancel_order_by_id(item.id)
+    client_api.close_position(symbol)
 
 
 def notify_admin(message: str):
@@ -163,6 +186,15 @@ def place_entry(client_api: TradingClient, event: dict, signal_id: str,
     if any(position.symbol == symbol for position in positions):
         log.info("Ignoring entry for already-held symbol %s", symbol)
         return
+    open_orders = client_api.get_orders(GetOrdersRequest(
+        status=QueryOrderStatus.OPEN, limit=500, nested=True,
+    ))
+    if any(getattr(item, "symbol", None) == symbol
+           and str(getattr(getattr(item, "side", ""), "value",
+                           getattr(item, "side", ""))).lower() == OrderSide.BUY.value
+           for order in open_orders for item in order_tree(order)):
+        log.info("Ignoring entry for %s because an open buy order already exists", symbol)
+        return
     price = float(event["price"])
     if price <= 0:
         return
@@ -173,8 +205,7 @@ def place_entry(client_api: TradingClient, event: dict, signal_id: str,
     equity = risk["equity"]
     allocation = risk["reconciliation"]["allocations"][pool]
     available = max(0.0, min(allocation["remaining"], risk["buying_power"]))
-    stop_loss_pct = min(max(float(event.get("stop_loss_pct", settings.stop_loss_pct)), 0.005), 0.10)
-    take_profit_pct = max(float(event.get("take_profit_pct", settings.take_profit_pct)), stop_loss_pct * 2)
+    stop_loss_pct = min(max(float(event.get("stop_loss_pct", settings.stop_loss_pct)), 0.005), 0.25)
     risk_budget = equity * min(settings.max_trade_risk_pct, 0.01)
     qty = min(math.floor(risk_budget / (price * stop_loss_pct)),
               math.floor(available / price), 100)
@@ -182,7 +213,7 @@ def place_entry(client_api: TradingClient, event: dict, signal_id: str,
         log.info("Risk/allocation limits leave no whole shares for %s", symbol)
         return
 
-    client_order_id = "kt-" + hashlib.sha256(f"{symbol}:{signal_id}".encode()).hexdigest()[:28]
+    client_order_id = "kt-" + hashlib.sha256(f"{symbol}:{pool}:{signal_id}".encode()).hexdigest()[:28]
     if not reserve_order(client_order_id, signal_id, symbol, qty, pool):
         try:
             existing = client_api.get_order_by_client_id(client_order_id)
@@ -192,19 +223,31 @@ def place_entry(client_api: TradingClient, event: dict, signal_id: str,
             log.info("Signal %s was already reserved; no duplicate order submitted", signal_id)
         return
     stop_price = max(round(price * (1 - stop_loss_pct), 2), 0.01)
-    take_profit_price = max(round(price * (1 + take_profit_pct), 2), stop_price + 0.01)
     try:
-        order = client_api.submit_order(MarketOrderRequest(
-            symbol=symbol, qty=qty, side=OrderSide.BUY, type=OrderType.MARKET,
-            time_in_force=TimeInForce.DAY, order_class=OrderClass.BRACKET,
-            stop_loss=StopLossRequest(stop_price=stop_price),
-            take_profit=TakeProfitRequest(limit_price=take_profit_price),
-            client_order_id=client_order_id,
-        ))
+        if pool == "intraday":
+            take_profit_pct = max(float(event.get("take_profit_pct", settings.take_profit_pct)),
+                                  stop_loss_pct * 2)
+            take_profit_price = max(round(price * (1 + take_profit_pct), 2), stop_price + 0.01)
+            request = MarketOrderRequest(
+                symbol=symbol, qty=qty, side=OrderSide.BUY, type=OrderType.MARKET,
+                time_in_force=TimeInForce.DAY, order_class=OrderClass.BRACKET,
+                stop_loss=StopLossRequest(stop_price=stop_price),
+                take_profit=TakeProfitRequest(limit_price=take_profit_price),
+                client_order_id=client_order_id,
+            )
+        else:
+            # Multi-day positions use a GTC protective stop without an arbitrary take-profit.
+            request = MarketOrderRequest(
+                symbol=symbol, qty=qty, side=OrderSide.BUY, type=OrderType.MARKET,
+                time_in_force=TimeInForce.GTC, order_class=OrderClass.OTO,
+                stop_loss=StopLossRequest(stop_price=stop_price),
+                client_order_id=client_order_id,
+            )
+        order = client_api.submit_order(request)
         update_order(client_order_id, str(order.id), "accepted")
         mode = "paper" if settings.alpaca_paper else "LIVE"
-        log.warning("Submitted %s bracket order %s %s qty=%s stop=%s target=%s",
-                    mode, symbol, pool, qty, stop_price, take_profit_price)
+        log.warning("Submitted %s %s order %s qty=%s stop=%s",
+                    mode, pool, symbol, qty, stop_price)
     except Exception:
         update_order(client_order_id, None, "rejected")
         log.exception("Alpaca order submission failed for %s", symbol)
@@ -221,13 +264,16 @@ def handle_signal(client_api: TradingClient, event: dict, signal_id: str, risk: 
         return
     account, positions, risk = reconcile(client_api)
     if event.get("action") == "sell":
-        if risk["halted"]:
-            log.critical("Circuit breaker is active; position exits must be handled by attached stops")
+        assigned_pool = managed_pool_assignments().get(event["symbol"])
+        event_pool = event.get("pool", "intraday")
+        if assigned_pool != event_pool:
+            log.info("Ignoring %s exit for %s position assigned to %s",
+                     event_pool, event["symbol"], assigned_pool)
             return
         if event["symbol"] in managed_symbols() and any(
             position.symbol == event["symbol"] for position in positions
         ):
-            client_api.close_position(event["symbol"])
+            close_managed_position(client_api, event["symbol"], event_pool, positions)
         return
     place_entry(client_api, event, signal_id, account, positions, risk)
 

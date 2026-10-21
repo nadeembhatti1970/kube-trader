@@ -24,6 +24,10 @@ def init_db():
             CREATE TABLE IF NOT EXISTS strategy_state (
               symbol TEXT PRIMARY KEY, above_sma BOOLEAN NOT NULL DEFAULT FALSE
             );
+            CREATE TABLE IF NOT EXISTS horizon_strategy_state (
+              symbol TEXT NOT NULL, pool TEXT NOT NULL, above_trend BOOLEAN NOT NULL,
+              last_bar_date DATE NOT NULL, PRIMARY KEY (symbol, pool)
+            );
             CREATE TABLE IF NOT EXISTS backtest_metrics (
               symbol TEXT PRIMARY KEY, as_of TIMESTAMPTZ NOT NULL,
               bars INTEGER NOT NULL, total_return DOUBLE PRECISION NOT NULL,
@@ -79,6 +83,24 @@ def save_strategy_state(symbol: str, above: bool):
           INSERT INTO strategy_state(symbol, above_sma) VALUES (%s, %s)
           ON CONFLICT(symbol) DO UPDATE SET above_sma=excluded.above_sma
         """, (symbol, above))
+
+
+def horizon_strategy_state(symbol: str, pool: str):
+    with connect() as db:
+        return db.execute(
+            "SELECT above_trend, last_bar_date FROM horizon_strategy_state WHERE symbol=%s AND pool=%s",
+            (symbol, pool),
+        ).fetchone()
+
+
+def save_horizon_strategy_state(symbol: str, pool: str, above: bool, bar_date):
+    with connect() as db:
+        db.execute("""
+          INSERT INTO horizon_strategy_state(symbol, pool, above_trend, last_bar_date)
+          VALUES (%s, %s, %s, %s)
+          ON CONFLICT(symbol, pool) DO UPDATE SET above_trend=excluded.above_trend,
+            last_bar_date=excluded.last_bar_date
+        """, (symbol, pool, above, bar_date))
 
 
 def save_backtest(symbol: str, metrics: dict):
@@ -147,6 +169,17 @@ def managed_pool_assignments() -> dict[str, str]:
           ORDER BY symbol, created_at DESC
         """).fetchall()
     return {row["symbol"]: row["pool"] for row in rows}
+
+
+def managed_order_id(symbol: str, pool: str):
+    with connect() as db:
+        row = db.execute("""
+          SELECT broker_order_id FROM orders
+          WHERE symbol=%s AND pool=%s AND broker_order_id IS NOT NULL
+            AND status IN ('accepted','filled','new','partially_filled','pending_new')
+          ORDER BY created_at DESC LIMIT 1
+        """, (symbol, pool)).fetchone()
+    return row["broker_order_id"] if row else None
 
 
 def latest_backtest(symbol: str):

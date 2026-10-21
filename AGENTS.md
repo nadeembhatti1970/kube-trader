@@ -9,7 +9,7 @@ Kube Trader is a self-hosted stock research and automated trading application. M
 The runtime consists of a FastAPI API plus four independently deployed workers:
 
 1. `app.services.ingestion` receives Alpaca minute bars and writes them to PostgreSQL and the Redis `market.bars` stream.
-2. `app.services.signals` calculates 5/20-bar SMA state changes and RSI(14), then publishes events to `strategy.signals`.
+2. `app.services.signals` calculates the 5/20-minute intraday crossover plus daily swing (close vs 20-day SMA) and core (50/200-day SMA crossover) signals, then publishes events to `strategy.signals`.
 3. `app.services.backtesting` updates rolling SMA return, drawdown, and per-bar Sharpe metrics.
 4. `app.services.execution` reconciles Alpaca account state, checks limits, and can submit paper or live orders according to `ALPACA_PAPER`.
 
@@ -20,10 +20,10 @@ Docker Compose, Kubernetes, and Helm definitions should keep these workers in se
 - **Brokerage mode:** `ALPACA_PAPER` defaults to `true` and must be passed to `TradingClient(..., paper=settings.alpaca_paper)`. `false` selects the live Alpaca endpoint. Keep `EXECUTION_ENABLED=false` by default in every deployment template; live execution requires the operator to explicitly set `ALPACA_PAPER=false`, provide live credentials, and enable execution. Never commit credentials.
 - **Explicit opt-in:** `MARKET_STREAM_ENABLED`, `EXECUTION_ENABLED`, and `STOP_MANAGEMENT_ENABLED` default to false. Preserve those defaults in `.env.example`, Compose, Kubernetes, and Helm.
 - **Position risk:** automated entry sizing is whole-share quantity, bounded by the configured stop distance and at most 1% of account equity per entry. Keep the hard 1% cap even if `MAX_TRADE_RISK_PCT` is set higher.
-- **Protective exits:** automated entries use Alpaca bracket orders with a stop and take-profit leg. Optional stop repair applies only to bot-managed positions; do not silently manage unrelated account positions.
+- **Protective exits:** intraday entries use Alpaca day bracket orders with stop and take-profit legs. Swing/core entries use GTC OTO entries with protective stops and their daily trend exits; swing stop distance uses 2x ATR by default and core uses a 20% default stop. Optional stop repair applies only to bot-managed positions; do not silently manage unrelated account positions.
 - **Daily breaker:** compare equity with the New York session baseline from Alpaca portfolio history, falling back to previous-close equity. At or beyond the configured 3% loss threshold, persist a halt for new entries for that session and send a critical log plus an optional generic webhook alert. Do not remove broker-side bracket exits or liquidate positions as part of the breaker.
-- **Allocation pools:** default virtual targets are 20% intraday, 30% swing, and 50% core, and must total 100%. They constrain/report exposure; they do not move cash between brokerage accounts. The current signal worker emits intraday signals only. Do not imply that swing/core strategies or automatic pool rebalancing exist.
-- **Long-only sample strategy:** buy on an above-SMA state change and close bot-managed positions on a below-SMA change. Reject stale signals and new entries while the US market is closed. RSI is recorded as a factor but is not an execution filter.
+- **Allocation pools:** default virtual targets are 20% intraday, 30% swing, and 50% core, and must total 100%. All three have signal strategies; pool targets constrain/report exposure and do not move cash between brokerage accounts or automatically rebalance holdings.
+- **Long-only sample strategies:** intraday buys/sells on 5/20-minute SMA state changes; swing enters when the completed daily close crosses above its 20-day SMA and exits below it; core enters on a 50-day/200-day golden cross and exits on a death cross. Daily signals use completed bars, are persisted once per daily bar, and do not replay old signals on a repeat delivery. Reject stale signals and new entries while the US market is closed. RSI is recorded as a factor but is not an execution filter. The rolling backtest covers only the intraday SMA strategy.
 
 ## Data, secrets, and reliability
 

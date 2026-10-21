@@ -23,6 +23,9 @@ config:
   coreAllocationPct: "0.50"
   signalFastBars: "5"
   signalSlowBars: "20"
+  swingAtrPeriod: "14"
+  swingAtrMultiple: "2.0"
+  coreStopLossPct: "0.20"
   reconcileIntervalSeconds: "30"
   maxSignalAgeSeconds: "180"
 persistence:

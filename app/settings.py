@@ -25,6 +25,9 @@ class Settings(BaseSettings):
     core_allocation_pct: float = 0.50
     signal_fast_bars: int = 5
     signal_slow_bars: int = 20
+    swing_atr_period: int = 14
+    swing_atr_multiple: float = 2.0
+    core_stop_loss_pct: float = 0.20
     alpaca_data_feed: str = "iex"
     reconcile_interval_seconds: int = 30
     max_signal_age_seconds: int = 180
