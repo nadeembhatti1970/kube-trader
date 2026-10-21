@@ -41,7 +41,11 @@ Alpaca's `StockDataStream` supplies minute bars. The configured feed defaults to
 | `SIGNAL_FAST_BARS` / `SIGNAL_SLOW_BARS` | `5` / `20` | SMA periods measured in minute bars |
 | `SWING_ATR_PERIOD` / `SWING_ATR_MULTIPLE` | `14` / `2.0` | Daily ATR period and stop multiple for swing orders |
 | `CORE_STOP_LOSS_PCT` | `0.20` | Core GTC protective stop distance |
-| `UNIVERSE_SCREEN_ENABLED` | `true` | Screen configured candidates at ingestion startup |
+| `ETF_HOLDINGS_SYMBOL` | `SPY` | ETF symbol identifying the holdings source |
+| `ETF_HOLDINGS_URL` | State Street SPY XLSX | HTTPS issuer workbook URL for ETF constituents |
+| `ETF_MAX_HOLDINGS` | `100` | Largest holdings by fund weight screened per refresh; minimum 20 |
+| `UNIVERSE_REFRESH_SECONDS` | `86400` | Holdings and subscription refresh schedule; minimum 3600 seconds |
+| `UNIVERSE_SCREEN_ENABLED` | `true` | Screen ETF holdings at ingestion startup and scheduled refreshes |
 | `MIN_SYMBOL_PRICE` / `MIN_AVG_DOLLAR_VOLUME` | `5` / `20000000` | Price and 20-day average dollar-volume floors |
 | `MAX_WATCHLIST_SYMBOLS` | `40` | Maximum symbols subscribed after screening |
 | `MAX_OPEN_POSITIONS` | `20` | Maximum total broker positions before rejecting an entry |
@@ -63,7 +67,7 @@ For daily strategies, it fetches daily bars using `MARKET_DATA_PROVIDER`, exclud
 
 The backtesting worker recalculates only the intraday SMA simulation over up to 500 recent minute bars whenever a new bar arrives. `/research/backtests/{symbol}` separately compares all three rules, applies a configurable per-side cost estimate, and reports a chronological in-sample/out-of-sample split plus buy-and-hold comparison. The research endpoint uses up to 50,000 locally collected minute bars for intraday and up to the requested daily history for swing/core. Signals are assumed filled at bar close; minute Sharpe annualization is approximate. Results omit market impact, taxes, historical universe membership, and corporate-action timing and must not be treated as expected performance.
 
-The ingestion worker screens only the configured `DEFAULT_SYMBOLS` candidates by minimum price and 20-day average dollar volume at startup, then subscribes to the most liquid eligible symbols up to `MAX_WATCHLIST_SYMBOLS`. It does not discover all exchange listings or refresh the selection until restart. `/universe` reports the last screen. New entries are limited by pool budgets, buying power, `MAX_OPEN_POSITIONS`, `MAX_SYMBOL_EXPOSURE_PCT`, and `MAX_SECTOR_EXPOSURE_PCT`; existing untracked positions count toward symbol/sector exposure. Custom symbols without a `SYMBOL_SECTORS` mapping are grouped under `unclassified`.
+The ingestion worker downloads the configured ETF issuer XLSX holdings at startup and every `UNIVERSE_REFRESH_SECONDS` (24 hours by default), screens holdings by minimum price and 20-day average dollar volume, then subscribes to the most liquid eligible symbols up to `MAX_WATCHLIST_SYMBOLS`. It retains active subscriptions when a scheduled refresh fails. This is limited to one fund's published constituents, not all exchange listings. `/universe` reports the latest screen. New entries are limited by pool budgets, buying power, `MAX_OPEN_POSITIONS`, `MAX_SYMBOL_EXPOSURE_PCT`, and `MAX_SECTOR_EXPOSURE_PCT`; existing untracked positions count toward symbol/sector exposure. Custom symbols without a `SYMBOL_SECTORS` mapping are grouped under `unclassified`.
 
 ## Allocation and order sizing
 

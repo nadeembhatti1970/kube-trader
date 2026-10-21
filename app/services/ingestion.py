@@ -34,13 +34,41 @@ async def main():
         record_bar(event)
         publish(BAR_STREAM, event)
 
-    symbols, screen = select_symbols(settings)
+    if settings.universe_refresh_seconds < 3600:
+        raise ValueError("UNIVERSE_REFRESH_SECONDS must be at least 3600 seconds")
+
+    symbols, screen = await asyncio.to_thread(select_symbols, settings)
     save_universe_snapshot(screen)
-    log.info("Universe screen selected %s/%s symbols: %s", len(symbols), len(screen), symbols)
+    log.info("ETF %s universe selected %s/%s symbols: %s",
+             settings.etf_holdings_symbol, len(symbols), len(screen), symbols)
     if not symbols:
         raise RuntimeError("No symbols selected for Alpaca market data stream")
     stream.subscribe_bars(on_bar, *symbols)
-    log.info("Starting Alpaca %s minute-bar stream for %s", feed.value, symbols)
+
+    async def refresh_universe():
+        nonlocal symbols
+        while True:
+            await asyncio.sleep(settings.universe_refresh_seconds)
+            try:
+                next_symbols, next_screen = await asyncio.to_thread(select_symbols, settings)
+                if not next_symbols:
+                    raise RuntimeError("ETF universe refresh selected no symbols")
+                added = sorted(set(next_symbols) - set(symbols))
+                removed = sorted(set(symbols) - set(next_symbols))
+                if added:
+                    stream.subscribe_bars(on_bar, *added)
+                if removed:
+                    stream.unsubscribe_bars(*removed)
+                symbols = next_symbols
+                save_universe_snapshot(next_screen)
+                log.info("Refreshed ETF %s universe: %s symbols (%s added, %s removed)",
+                         settings.etf_holdings_symbol, len(symbols), len(added), len(removed))
+            except Exception:
+                log.exception("ETF universe refresh failed; retaining current subscriptions")
+
+    asyncio.create_task(refresh_universe())
+    log.info("Starting Alpaca %s minute-bar stream for ETF %s holdings: %s",
+             feed.value, settings.etf_holdings_symbol, symbols)
     await asyncio.to_thread(stream.run)
 
 

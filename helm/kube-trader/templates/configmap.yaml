@@ -25,7 +25,10 @@ data:
   RECONCILE_INTERVAL_SECONDS: {{ .Values.config.reconcileIntervalSeconds | quote }}
   MAX_SIGNAL_AGE_SECONDS: {{ .Values.config.maxSignalAgeSeconds | quote }}
   DATABASE_PATH: /data/market.db
-  DEFAULT_SYMBOLS: {{ .Values.config.defaultSymbols | quote }}
+  ETF_HOLDINGS_SYMBOL: {{ .Values.config.etfHoldingsSymbol | quote }}
+  ETF_HOLDINGS_URL: {{ .Values.config.etfHoldingsUrl | quote }}
+  ETF_MAX_HOLDINGS: {{ .Values.config.etfMaxHoldings | quote }}
+  UNIVERSE_REFRESH_SECONDS: {{ .Values.config.universeRefreshSeconds | quote }}
   UNIVERSE_SCREEN_ENABLED: {{ .Values.config.universeScreenEnabled | quote }}
   MIN_SYMBOL_PRICE: {{ .Values.config.minSymbolPrice | quote }}
   MIN_AVG_DOLLAR_VOLUME: {{ .Values.config.minAvgDollarVolume | quote }}

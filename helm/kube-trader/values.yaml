@@ -13,7 +13,10 @@ config:
   stopManagementEnabled: false
   alpacaPaper: true
   alpacaDataFeed: iex
-  defaultSymbols: AAPL,MSFT,NVDA,AMZN,GOOGL,META,AVGO,ORCL,CRM,AMD,JPM,V,XOM,CVX,LLY,JNJ,UNH,WMT,COST,PG,KO,HD,TSLA,CAT,GE,NFLX,TMUS,NEE,PLD,SPY,QQQ,IWM,DIA,GLD,TLT
+  etfHoldingsSymbol: SPY
+  etfHoldingsUrl: https://www.ssga.com/library-content/products/fund-data/etfs/us/holdings-daily-us-en-spy.xlsx
+  etfMaxHoldings: "100"
+  universeRefreshSeconds: "86400"
   universeScreenEnabled: true
   minSymbolPrice: "5"
   minAvgDollarVolume: "20000000"

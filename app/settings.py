@@ -12,9 +12,10 @@ class Settings(BaseSettings):
     database_path: str = "/data/market.db"
     postgres_dsn: str = "postgresql://kube_trader:kube_trader@postgres:5432/kube_trader"
     redis_url: str = "redis://redis:6379/0"
-    default_symbols: str = ("AAPL,MSFT,NVDA,AMZN,GOOGL,META,AVGO,ORCL,CRM,AMD,JPM,V,"
-                            "XOM,CVX,LLY,JNJ,UNH,WMT,COST,PG,KO,HD,TSLA,CAT,GE,NFLX,TMUS,"
-                            "NEE,PLD,SPY,QQQ,IWM,DIA,GLD,TLT")
+    etf_holdings_symbol: str = "SPY"
+    etf_holdings_url: str = "https://www.ssga.com/library-content/products/fund-data/etfs/us/holdings-daily-us-en-spy.xlsx"
+    etf_max_holdings: int = 100
+    universe_refresh_seconds: int = 86400
     universe_screen_enabled: bool = True
     min_symbol_price: float = 5.0
     min_avg_dollar_volume: float = 20_000_000.0

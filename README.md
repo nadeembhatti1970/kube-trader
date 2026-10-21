@@ -25,9 +25,9 @@ FastAPI remains a separate API pod. Redis Streams carry events; PostgreSQL store
 
 ## Universe and concentration limits
 
-`DEFAULT_SYMBOLS` is a candidate list (the shipped example contains 35 large-cap stocks and broad-market, gold, and Treasury ETFs). At ingestion startup, the universe screen retains candidates with at least 20 completed daily bars, a price of at least `MIN_SYMBOL_PRICE`, and 20-day average dollar volume of at least `MIN_AVG_DOLLAR_VOLUME`, then takes the most liquid up to `MAX_WATCHLIST_SYMBOLS`. It refreshes on ingestion restart; it is not a market-wide scanner or a scheduled rebalance. Review `/universe` to see candidate decisions and screening thresholds; `/symbols` lists configured candidates.
+At startup, ingestion downloads the configured ETF holdings workbook (SPY from State Street by default), then screens the largest `ETF_MAX_HOLDINGS` constituents by fund weight (100 by default) for at least 20 completed daily bars, a price of at least `MIN_SYMBOL_PRICE`, and 20-day average dollar volume of at least `MIN_AVG_DOLLAR_VOLUME`. It subscribes to the most liquid eligible symbols up to `MAX_WATCHLIST_SYMBOLS` and refreshes the holdings and subscriptions every `UNIVERSE_REFRESH_SECONDS` (24 hours by default). If a refresh fails, the worker keeps its current subscriptions. This is an ETF-constituent universe, not a market-wide scanner or a portfolio rebalance. Review `/universe` for the latest holdings and screening results; `/symbols` lists the selected symbols. State Street publishes SPY holdings daily; its workbook structure and access can change.
 
-New orders are constrained by pool budget, buying power, `MAX_OPEN_POSITIONS`, per-symbol exposure, and per-sector exposure. Defaults cap each symbol at 5% of equity and each mapped sector at 25%. Existing broker positions, including untracked positions, count toward those caps. The shipped candidate symbols have built-in sector groups; assign custom tickers with `SYMBOL_SECTORS=XYZ:technology,ABC:healthcare`. Unmapped symbols share an `unclassified` group, which is also capped.
+New orders are constrained by pool budget, buying power, `MAX_OPEN_POSITIONS`, per-symbol exposure, and per-sector exposure. Defaults cap each symbol at 5% of equity and each mapped sector at 25%. Existing broker positions, including untracked positions, count toward those caps. Built-in sector groups cover the original sample tickers; assign additional ETF constituents with `SYMBOL_SECTORS=XYZ:technology,ABC:healthcare`. Unmapped symbols share an `unclassified` group, which is also capped.
 
 ## Risk and execution behavior
 
@@ -123,7 +123,10 @@ The chart defaults to paper mode and all stream/execution switches to off. To en
 | `ALPACA_API_KEY`, `ALPACA_SECRET_KEY` | empty | Alpaca credentials for streaming and trading, matching the selected endpoint |
 | `ALPACA_PAPER` | `true` | Selects paper (`true`) or live (`false`) trading endpoint |
 | `ALPACA_DATA_FEED` | `iex` | Alpaca stock feed (`iex` or `sip`, subject to entitlements) |
-| `DEFAULT_SYMBOLS` | Curated liquid U.S. stock/ETF list | Candidate symbols for the startup universe screen |
+| `ETF_HOLDINGS_SYMBOL` | `SPY` | ETF whose published holdings supply universe candidates |
+| `ETF_HOLDINGS_URL` | State Street SPY holdings workbook | HTTPS URL for an issuer XLSX holdings file |
+| `ETF_MAX_HOLDINGS` | `100` | Largest fund constituents by holding weight to screen per refresh (minimum 20) |
+| `UNIVERSE_REFRESH_SECONDS` | `86400` | Holdings refresh interval (minimum 3600 seconds) |
 | `UNIVERSE_SCREEN_ENABLED` | `true` | Filters candidates by price and average dollar volume at ingestion startup |
 | `MIN_SYMBOL_PRICE` / `MIN_AVG_DOLLAR_VOLUME` | `5` / `20000000` | Minimum close price and 20-day average dollar volume in USD |
 | `MAX_WATCHLIST_SYMBOLS` | `40` | Maximum selected symbols subscribed to the market stream |

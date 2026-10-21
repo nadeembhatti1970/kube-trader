@@ -41,19 +41,23 @@ def readyz():
 
 @app.get("/symbols")
 def symbols():
-    return {"symbols": [s.strip().upper() for s in settings.default_symbols.split(",") if s.strip()]}
+    return {"symbols": sorted({item["symbol"] for item in latest_universe_snapshot() if item.get("selected")})}
 
 
 @app.get("/universe")
 def universe():
+    screened = latest_universe_snapshot()
     return {
-        "candidates": [s.strip().upper() for s in settings.default_symbols.split(",") if s.strip()],
-        "screened": latest_universe_snapshot(),
+        "source": {"type": "etf_holdings", "symbol": settings.etf_holdings_symbol},
+        "candidates": [item["symbol"] for item in screened],
+        "screened": screened,
         "filters": {
             "enabled": settings.universe_screen_enabled,
             "minimum_price": settings.min_symbol_price,
             "minimum_average_dollar_volume": settings.min_avg_dollar_volume,
             "maximum_symbols": settings.max_watchlist_symbols,
+            "maximum_holdings_to_screen": settings.etf_max_holdings,
+            "refresh_seconds": settings.universe_refresh_seconds,
         },
     }
 
