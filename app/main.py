@@ -4,7 +4,9 @@ from fastapi import FastAPI, HTTPException, Query
 from pydantic import BaseModel
 
 from app.market_data import get_daily_bars
-from app.database import connect, get_risk_state, latest_account_snapshot, latest_backtest
+from app.database import (connect, get_risk_state, latest_account_snapshot, latest_backtest,
+                          latest_universe_snapshot, recent_closes)
+from app.research import evaluate_walk_forward
 from app.settings import get_settings
 from app.storage import store_bars
 
@@ -40,6 +42,20 @@ def readyz():
 @app.get("/symbols")
 def symbols():
     return {"symbols": [s.strip().upper() for s in settings.default_symbols.split(",") if s.strip()]}
+
+
+@app.get("/universe")
+def universe():
+    return {
+        "candidates": [s.strip().upper() for s in settings.default_symbols.split(",") if s.strip()],
+        "screened": latest_universe_snapshot(),
+        "filters": {
+            "enabled": settings.universe_screen_enabled,
+            "minimum_price": settings.min_symbol_price,
+            "minimum_average_dollar_volume": settings.min_avg_dollar_volume,
+            "maximum_symbols": settings.max_watchlist_symbols,
+        },
+    }
 
 
 @app.get("/market-data/{symbol}")
@@ -82,6 +98,37 @@ def backtest_metrics(symbol: str):
         raise
     except Exception as exc:
         raise HTTPException(status_code=503, detail="Backtest database is unavailable") from exc
+
+
+@app.get("/research/backtests/{symbol}")
+def research_backtest(
+    symbol: str,
+    days: int = Query(default=1260, ge=260, le=2520),
+    cost_bps: float | None = Query(default=None, ge=0, le=100),
+    train_fraction: float | None = Query(default=None, ge=0.5, le=0.9),
+):
+    ticker = symbol.upper()
+    costs = settings.backtest_cost_bps if cost_bps is None else cost_bps
+    split = settings.backtest_train_fraction if train_fraction is None else train_fraction
+    try:
+        minute_rows = recent_closes(ticker, settings.intraday_backtest_bars)
+        daily_rows = get_daily_bars(ticker, days, settings)
+        minute_closes = [float(row["close"]) for row in minute_rows]
+        daily_closes = [float(row["close"]) for row in daily_rows]
+        return {
+            "symbol": ticker,
+            "cost_bps_per_side": costs,
+            "train_fraction": split,
+            "intraday_data_bars": len(minute_closes),
+            "daily_data_bars": len(daily_closes),
+            "strategies": {
+                "intraday": evaluate_walk_forward(minute_closes, "intraday", costs, split),
+                "swing": evaluate_walk_forward(daily_closes, "swing", costs, split),
+                "core": evaluate_walk_forward(daily_closes, "core", costs, split),
+            },
+        }
+    except Exception as exc:
+        raise HTTPException(status_code=502, detail=f"Research backtest unavailable: {exc}") from exc
 
 
 @app.get("/account/reconciliation")

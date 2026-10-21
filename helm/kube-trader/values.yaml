@@ -13,7 +13,15 @@ config:
   stopManagementEnabled: false
   alpacaPaper: true
   alpacaDataFeed: iex
-  defaultSymbols: AAPL,MSFT,SPY
+  defaultSymbols: AAPL,MSFT,NVDA,AMZN,GOOGL,META,AVGO,ORCL,CRM,AMD,JPM,V,XOM,CVX,LLY,JNJ,UNH,WMT,COST,PG,KO,HD,TSLA,CAT,GE,NFLX,TMUS,NEE,PLD,SPY,QQQ,IWM,DIA,GLD,TLT
+  universeScreenEnabled: true
+  minSymbolPrice: "5"
+  minAvgDollarVolume: "20000000"
+  maxWatchlistSymbols: "40"
+  symbolSectors: ""
+  maxOpenPositions: "20"
+  maxSymbolExposurePct: "0.05"
+  maxSectorExposurePct: "0.25"
   maxTradeRiskPct: "0.01"
   dailyDrawdownLimitPct: "0.03"
   stopLossPct: "0.02"
@@ -26,6 +34,9 @@ config:
   swingAtrPeriod: "14"
   swingAtrMultiple: "2.0"
   coreStopLossPct: "0.20"
+  backtestCostBps: "5"
+  backtestTrainFraction: "0.70"
+  intradayBacktestBars: "50000"
   reconcileIntervalSeconds: "30"
   maxSignalAgeSeconds: "180"
 persistence:

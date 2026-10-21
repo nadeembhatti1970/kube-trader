@@ -12,7 +12,17 @@ class Settings(BaseSettings):
     database_path: str = "/data/market.db"
     postgres_dsn: str = "postgresql://kube_trader:kube_trader@postgres:5432/kube_trader"
     redis_url: str = "redis://redis:6379/0"
-    default_symbols: str = "AAPL,MSFT,SPY"
+    default_symbols: str = ("AAPL,MSFT,NVDA,AMZN,GOOGL,META,AVGO,ORCL,CRM,AMD,JPM,V,"
+                            "XOM,CVX,LLY,JNJ,UNH,WMT,COST,PG,KO,HD,TSLA,CAT,GE,NFLX,TMUS,"
+                            "NEE,PLD,SPY,QQQ,IWM,DIA,GLD,TLT")
+    universe_screen_enabled: bool = True
+    min_symbol_price: float = 5.0
+    min_avg_dollar_volume: float = 20_000_000.0
+    max_watchlist_symbols: int = 40
+    symbol_sectors: str = ""
+    max_open_positions: int = 20
+    max_symbol_exposure_pct: float = 0.05
+    max_sector_exposure_pct: float = 0.25
     execution_enabled: bool = False
     stop_management_enabled: bool = False
     market_stream_enabled: bool = False
@@ -28,6 +38,9 @@ class Settings(BaseSettings):
     swing_atr_period: int = 14
     swing_atr_multiple: float = 2.0
     core_stop_loss_pct: float = 0.20
+    backtest_cost_bps: float = 5.0
+    backtest_train_fraction: float = 0.70
+    intraday_backtest_bars: int = 50_000
     alpaca_data_feed: str = "iex"
     reconcile_interval_seconds: int = 30
     max_signal_age_seconds: int = 180

@@ -14,11 +14,12 @@ from alpaca.trading.requests import (GetOrdersRequest, MarketOrderRequest, StopL
                                      GetPortfolioHistoryRequest, StopOrderRequest,
                                      TakeProfitRequest)
 
-from app.database import (get_risk_state, init_db, managed_order_id, managed_pool_assignments,
-                          managed_symbols, reserve_order, save_account_snapshot,
-                          save_risk_state, update_order)
+from app.database import (get_risk_state, init_db, managed_order_id, managed_order_stop_loss_pct,
+                          managed_pool_assignments, managed_symbols, reserve_order,
+                          save_account_snapshot, save_risk_state, update_order)
 from app.settings import get_settings
 from app.streams import SIGNAL_STREAM, client, ensure_group, read_group
+from app.universe import sector_for_symbol
 
 logging.basicConfig(level=logging.INFO)
 log = logging.getLogger("execution")
@@ -96,6 +97,7 @@ def reconcile(client_api: TradingClient):
     stop_gaps = []
     pool_by_symbol = managed_pool_assignments()
     exposures = {pool: 0.0 for pool in POOL_WEIGHTS}
+    sector_exposures = {}
     for position in positions:
         symbol = position.symbol
         qty = float(position.qty)
@@ -106,10 +108,14 @@ def reconcile(client_api: TradingClient):
                                  "avg_entry_price": avg_entry})
         pool = pool_by_symbol.get(symbol, "core")
         exposures[pool] += abs(float(position.market_value))
+        sector = sector_for_symbol(symbol, settings)
+        sector_exposures[sector] = sector_exposures.get(sector, 0.0) + abs(float(position.market_value))
         if (settings.stop_management_enabled and symbol in pool_by_symbol
                 and (symbol, close_side.value) not in protected):
-            stop_price = avg_entry * (1 - settings.stop_loss_pct if qty > 0
-                                      else 1 + settings.stop_loss_pct)
+            stop_pct = managed_order_stop_loss_pct(symbol, pool)
+            if stop_pct is None:
+                stop_pct = settings.stop_loss_pct
+            stop_price = avg_entry * (1 - stop_pct if qty > 0 else 1 + stop_pct)
             client_order_id = "kt-protect-" + uuid.uuid4().hex[:24]
             try:
                 client_api.submit_order(StopOrderRequest(
@@ -130,6 +136,10 @@ def reconcile(client_api: TradingClient):
     weights = pool_weights()
     if any(weight < 0 for weight in weights.values()) or abs(sum(weights.values()) - 1.0) > 0.0001:
         raise ValueError("INTRADAY, SWING, and CORE allocation percentages must sum to 1.0")
+    if not 0 < settings.max_symbol_exposure_pct <= 1 or not 0 < settings.max_sector_exposure_pct <= 1:
+        raise ValueError("Symbol and sector exposure limits must be greater than 0 and at most 1")
+    if settings.max_open_positions < 1:
+        raise ValueError("MAX_OPEN_POSITIONS must be at least 1")
     allocations = {
         pool: {"target_ratio": weight, "target_equity": equity * weight,
                "exposure": exposures[pool],
@@ -139,7 +149,7 @@ def reconcile(client_api: TradingClient):
     diffs = {"untracked_broker_positions": sorted(broker_symbols - known),
              "managed_positions_missing_at_broker": sorted(known - broker_symbols),
              "positions_missing_protective_stop": stop_gaps,
-             "allocations": allocations}
+             "allocations": allocations, "sector_exposures": sector_exposures}
     save_account_snapshot(equity, buying_power, broker_positions, diffs)
 
     today = datetime.now(NY).date()
@@ -186,6 +196,9 @@ def place_entry(client_api: TradingClient, event: dict, signal_id: str,
     if any(position.symbol == symbol for position in positions):
         log.info("Ignoring entry for already-held symbol %s", symbol)
         return
+    if len(positions) >= settings.max_open_positions:
+        log.info("Ignoring entry for %s because MAX_OPEN_POSITIONS is reached", symbol)
+        return
     open_orders = client_api.get_orders(GetOrdersRequest(
         status=QueryOrderStatus.OPEN, limit=500, nested=True,
     ))
@@ -204,7 +217,16 @@ def place_entry(client_api: TradingClient, event: dict, signal_id: str,
         return
     equity = risk["equity"]
     allocation = risk["reconciliation"]["allocations"][pool]
-    available = max(0.0, min(allocation["remaining"], risk["buying_power"]))
+    sector = sector_for_symbol(symbol, settings)
+    symbol_exposure = sum(abs(float(position.market_value)) for position in positions
+                          if position.symbol == symbol)
+    sector_exposure = sum(abs(float(position.market_value)) for position in positions
+                          if sector_for_symbol(position.symbol, settings) == sector)
+    available = max(0.0, min(
+        allocation["remaining"], risk["buying_power"],
+        equity * settings.max_symbol_exposure_pct - symbol_exposure,
+        equity * settings.max_sector_exposure_pct - sector_exposure,
+    ))
     stop_loss_pct = min(max(float(event.get("stop_loss_pct", settings.stop_loss_pct)), 0.005), 0.25)
     risk_budget = equity * min(settings.max_trade_risk_pct, 0.01)
     qty = min(math.floor(risk_budget / (price * stop_loss_pct)),
@@ -214,7 +236,7 @@ def place_entry(client_api: TradingClient, event: dict, signal_id: str,
         return
 
     client_order_id = "kt-" + hashlib.sha256(f"{symbol}:{pool}:{signal_id}".encode()).hexdigest()[:28]
-    if not reserve_order(client_order_id, signal_id, symbol, qty, pool):
+    if not reserve_order(client_order_id, signal_id, symbol, qty, pool, stop_loss_pct):
         try:
             existing = client_api.get_order_by_client_id(client_order_id)
             status = str(getattr(existing.status, "value", existing.status)).lower()

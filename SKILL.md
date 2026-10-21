@@ -41,6 +41,13 @@ Alpaca's `StockDataStream` supplies minute bars. The configured feed defaults to
 | `SIGNAL_FAST_BARS` / `SIGNAL_SLOW_BARS` | `5` / `20` | SMA periods measured in minute bars |
 | `SWING_ATR_PERIOD` / `SWING_ATR_MULTIPLE` | `14` / `2.0` | Daily ATR period and stop multiple for swing orders |
 | `CORE_STOP_LOSS_PCT` | `0.20` | Core GTC protective stop distance |
+| `UNIVERSE_SCREEN_ENABLED` | `true` | Screen configured candidates at ingestion startup |
+| `MIN_SYMBOL_PRICE` / `MIN_AVG_DOLLAR_VOLUME` | `5` / `20000000` | Price and 20-day average dollar-volume floors |
+| `MAX_WATCHLIST_SYMBOLS` | `40` | Maximum symbols subscribed after screening |
+| `MAX_OPEN_POSITIONS` | `20` | Maximum total broker positions before rejecting an entry |
+| `MAX_SYMBOL_EXPOSURE_PCT` / `MAX_SECTOR_EXPOSURE_PCT` | `0.05` / `0.25` | Maximum equity exposure by symbol and sector group |
+| `BACKTEST_COST_BPS` / `BACKTEST_TRAIN_FRACTION` | `5` / `0.70` | Research endpoint cost assumption and chronological split |
+| `INTRADAY_BACKTEST_BARS` | `50000` | Locally stored minute bars available to research backtests |
 | `MAX_SIGNAL_AGE_SECONDS` | `180` | Maximum signal age accepted by execution |
 | `RECONCILE_INTERVAL_SECONDS` | `30` | Account and position reconciliation interval |
 | `ALERT_WEBHOOK_URL` | empty | Optional receiver for generic JSON breaker alerts |
@@ -54,7 +61,9 @@ For intraday signals, the worker reads recent minute closes from PostgreSQL, com
 
 For daily strategies, it fetches daily bars using `MARKET_DATA_PROVIDER`, excludes the current unfinished session bar, and caches the result during the New York trading date. Swing enters on a completed close crossing above the 20-day SMA and exits on a cross below; its protective stop defaults to 2x 14-day ATR. Core enters when the 50-day SMA crosses above the 200-day SMA and exits on the reverse cross; its protective stop defaults to 20%. Daily crossover state is persisted per symbol/pool/bar date, so repeated minute events do not duplicate daily signals. RSI remains informational and does not filter orders.
 
-The backtesting worker recalculates only the intraday SMA simulation over up to 500 recent minute bars whenever a new bar arrives. It does not evaluate swing/core rules. Its Sharpe value is a per-bar ratio, not annualized. Results do not include fees, slippage, corporate actions, or out-of-sample validation and must not be treated as a production evaluation.
+The backtesting worker recalculates only the intraday SMA simulation over up to 500 recent minute bars whenever a new bar arrives. `/research/backtests/{symbol}` separately compares all three rules, applies a configurable per-side cost estimate, and reports a chronological in-sample/out-of-sample split plus buy-and-hold comparison. The research endpoint uses up to 50,000 locally collected minute bars for intraday and up to the requested daily history for swing/core. Signals are assumed filled at bar close; minute Sharpe annualization is approximate. Results omit market impact, taxes, historical universe membership, and corporate-action timing and must not be treated as expected performance.
+
+The ingestion worker screens only the configured `DEFAULT_SYMBOLS` candidates by minimum price and 20-day average dollar volume at startup, then subscribes to the most liquid eligible symbols up to `MAX_WATCHLIST_SYMBOLS`. It does not discover all exchange listings or refresh the selection until restart. `/universe` reports the last screen. New entries are limited by pool budgets, buying power, `MAX_OPEN_POSITIONS`, `MAX_SYMBOL_EXPOSURE_PCT`, and `MAX_SECTOR_EXPOSURE_PCT`; existing untracked positions count toward symbol/sector exposure. Custom symbols without a `SYMBOL_SECTORS` mapping are grouped under `unclassified`.
 
 ## Allocation and order sizing
 

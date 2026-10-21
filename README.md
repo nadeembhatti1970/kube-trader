@@ -23,6 +23,12 @@ Daily bars (yfinance/Finnhub) ──────────► Swing/core signa
 
 FastAPI remains a separate API pod. Redis Streams carry events; PostgreSQL stores bars, strategy state, backtest metrics, account snapshots, allocation exposures, order reservations, and the daily risk state. The raw Kubernetes setup includes single-instance PostgreSQL and Redis StatefulSets with PVCs. The Helm chart deploys the same components.
 
+## Universe and concentration limits
+
+`DEFAULT_SYMBOLS` is a candidate list (the shipped example contains 35 large-cap stocks and broad-market, gold, and Treasury ETFs). At ingestion startup, the universe screen retains candidates with at least 20 completed daily bars, a price of at least `MIN_SYMBOL_PRICE`, and 20-day average dollar volume of at least `MIN_AVG_DOLLAR_VOLUME`, then takes the most liquid up to `MAX_WATCHLIST_SYMBOLS`. It refreshes on ingestion restart; it is not a market-wide scanner or a scheduled rebalance. Review `/universe` to see candidate decisions and screening thresholds; `/symbols` lists configured candidates.
+
+New orders are constrained by pool budget, buying power, `MAX_OPEN_POSITIONS`, per-symbol exposure, and per-sector exposure. Defaults cap each symbol at 5% of equity and each mapped sector at 25%. Existing broker positions, including untracked positions, count toward those caps. The shipped candidate symbols have built-in sector groups; assign custom tickers with `SYMBOL_SECTORS=XYZ:technology,ABC:healthcare`. Unmapped symbols share an `unclassified` group, which is also capped.
+
 ## Risk and execution behavior
 
 - **Endpoint selection:** `ALPACA_PAPER=true` selects Alpaca paper trading; `ALPACA_PAPER=false` selects the live brokerage endpoint. The same execution logic and risk checks apply to either endpoint. Use credentials for the selected endpoint.
@@ -58,11 +64,15 @@ curl http://localhost:8000/symbols
 curl http://localhost:8000/market-data/AAPL?days=90
 curl http://localhost:8000/signals/AAPL
 curl http://localhost:8000/backtests/AAPL
+curl http://localhost:8000/research/backtests/AAPL
+curl http://localhost:8000/universe
 curl http://localhost:8000/account/reconciliation
 curl http://localhost:8000/risk
 ```
 
 The daily history API supports `MARKET_DATA_PROVIDER=yfinance` (default) or `finnhub` with `FINNHUB_API_KEY`. Intraday WebSocket ingestion uses Alpaca and `ALPACA_DATA_FEED=iex` by default. Market-data entitlements and availability depend on the selected provider and plan.
+
+`/research/backtests/{symbol}` compares the 5/20-minute, 20-day swing, and 50/200-day core rules. It reports chronological in-sample and out-of-sample returns, drawdown, estimated per-side costs, trade counts, buy-and-hold returns, and annualized Sharpe. Defaults use 70% of each series for in-sample and 5 basis points per side; query parameters can override `train_fraction`, `cost_bps`, and daily `days`. Daily evaluation uses up to 1,260 bars; intraday evaluation uses up to `INTRADAY_BACKTEST_BARS` locally collected bars. Results are estimates with close-based fills, so they do not reproduce spreads, slippage, or market impact. Compare results across market regimes and symbols before changing execution settings.
 
 ## Docker image
 
@@ -113,6 +123,13 @@ The chart defaults to paper mode and all stream/execution switches to off. To en
 | `ALPACA_API_KEY`, `ALPACA_SECRET_KEY` | empty | Alpaca credentials for streaming and trading, matching the selected endpoint |
 | `ALPACA_PAPER` | `true` | Selects paper (`true`) or live (`false`) trading endpoint |
 | `ALPACA_DATA_FEED` | `iex` | Alpaca stock feed (`iex` or `sip`, subject to entitlements) |
+| `DEFAULT_SYMBOLS` | Curated liquid U.S. stock/ETF list | Candidate symbols for the startup universe screen |
+| `UNIVERSE_SCREEN_ENABLED` | `true` | Filters candidates by price and average dollar volume at ingestion startup |
+| `MIN_SYMBOL_PRICE` / `MIN_AVG_DOLLAR_VOLUME` | `5` / `20000000` | Minimum close price and 20-day average dollar volume in USD |
+| `MAX_WATCHLIST_SYMBOLS` | `40` | Maximum selected symbols subscribed to the market stream |
+| `SYMBOL_SECTORS` | empty | Optional comma-separated `SYMBOL:sector` overrides for custom symbols |
+| `MAX_OPEN_POSITIONS` | `20` | Maximum total account positions before skipping new entries |
+| `MAX_SYMBOL_EXPOSURE_PCT` / `MAX_SECTOR_EXPOSURE_PCT` | `0.05` / `0.25` | Account-equity limits for a symbol and its configured sector group |
 | `MARKET_STREAM_ENABLED` | `false` | Starts the Alpaca minute-bar WebSocket consumer |
 | `EXECUTION_ENABLED` | `false` | Enables automated entries/exits on the selected endpoint |
 | `STOP_MANAGEMENT_ENABLED` | `false` | Repairs missing stops on bot-managed positions |
@@ -123,6 +140,8 @@ The chart defaults to paper mode and all stream/execution switches to off. To en
 | `SIGNAL_FAST_BARS` / `SIGNAL_SLOW_BARS` | `5` / `20` | SMA periods, in minute bars |
 | `SWING_ATR_PERIOD` / `SWING_ATR_MULTIPLE` | `14` / `2.0` | Daily ATR stop distance for swing orders |
 | `CORE_STOP_LOSS_PCT` | `0.20` | Core GTC protective stop distance (20% default) |
+| `BACKTEST_COST_BPS` / `BACKTEST_TRAIN_FRACTION` | `5` / `0.70` | Research endpoint's estimated one-way costs and chronological train split |
+| `INTRADAY_BACKTEST_BARS` | `50000` | Maximum locally stored minute bars used by research backtests |
 | `RECONCILE_INTERVAL_SECONDS` | `30` | Brokerage reconciliation interval |
 | `MAX_SIGNAL_AGE_SECONDS` | `180` | Reject older or future-dated signals |
 | `ALERT_WEBHOOK_URL` | empty | Optional generic JSON circuit-breaker webhook receiver |

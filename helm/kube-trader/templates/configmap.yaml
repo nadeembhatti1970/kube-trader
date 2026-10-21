@@ -26,5 +26,16 @@ data:
   MAX_SIGNAL_AGE_SECONDS: {{ .Values.config.maxSignalAgeSeconds | quote }}
   DATABASE_PATH: /data/market.db
   DEFAULT_SYMBOLS: {{ .Values.config.defaultSymbols | quote }}
+  UNIVERSE_SCREEN_ENABLED: {{ .Values.config.universeScreenEnabled | quote }}
+  MIN_SYMBOL_PRICE: {{ .Values.config.minSymbolPrice | quote }}
+  MIN_AVG_DOLLAR_VOLUME: {{ .Values.config.minAvgDollarVolume | quote }}
+  MAX_WATCHLIST_SYMBOLS: {{ .Values.config.maxWatchlistSymbols | quote }}
+  SYMBOL_SECTORS: {{ .Values.config.symbolSectors | quote }}
+  MAX_OPEN_POSITIONS: {{ .Values.config.maxOpenPositions | quote }}
+  MAX_SYMBOL_EXPOSURE_PCT: {{ .Values.config.maxSymbolExposurePct | quote }}
+  MAX_SECTOR_EXPOSURE_PCT: {{ .Values.config.maxSectorExposurePct | quote }}
+  BACKTEST_COST_BPS: {{ .Values.config.backtestCostBps | quote }}
+  BACKTEST_TRAIN_FRACTION: {{ .Values.config.backtestTrainFraction | quote }}
+  INTRADAY_BACKTEST_BARS: {{ .Values.config.intradayBacktestBars | quote }}
   LOG_LEVEL: INFO
 

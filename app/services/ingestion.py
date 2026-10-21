@@ -5,9 +5,10 @@ from datetime import timezone
 from alpaca.data.enums import DataFeed
 from alpaca.data.live import StockDataStream
 
-from app.database import init_db, record_bar
+from app.database import init_db, record_bar, save_universe_snapshot
 from app.settings import get_settings
 from app.streams import BAR_STREAM, publish
+from app.universe import select_symbols
 
 logging.basicConfig(level=logging.INFO)
 log = logging.getLogger("ingestion")
@@ -33,7 +34,11 @@ async def main():
         record_bar(event)
         publish(BAR_STREAM, event)
 
-    symbols = [item.strip().upper() for item in settings.default_symbols.split(",") if item.strip()]
+    symbols, screen = select_symbols(settings)
+    save_universe_snapshot(screen)
+    log.info("Universe screen selected %s/%s symbols: %s", len(symbols), len(screen), symbols)
+    if not symbols:
+        raise RuntimeError("No symbols selected for Alpaca market data stream")
     stream.subscribe_bars(on_bar, *symbols)
     log.info("Starting Alpaca %s minute-bar stream for %s", feed.value, symbols)
     await asyncio.to_thread(stream.run)

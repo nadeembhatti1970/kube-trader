@@ -41,12 +41,19 @@ def init_db():
             CREATE TABLE IF NOT EXISTS orders (
               client_order_id TEXT PRIMARY KEY, signal_id TEXT NOT NULL, symbol TEXT NOT NULL,
               side TEXT NOT NULL, qty DOUBLE PRECISION NOT NULL, pool TEXT NOT NULL,
-              broker_order_id TEXT, status TEXT NOT NULL, created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+              broker_order_id TEXT, status TEXT NOT NULL, stop_loss_pct DOUBLE PRECISION,
+              created_at TIMESTAMPTZ NOT NULL DEFAULT now()
             );
+            ALTER TABLE orders ADD COLUMN IF NOT EXISTS stop_loss_pct DOUBLE PRECISION;
             CREATE TABLE IF NOT EXISTS account_snapshots (
               captured_at TIMESTAMPTZ PRIMARY KEY, equity DOUBLE PRECISION NOT NULL,
               buying_power DOUBLE PRECISION NOT NULL, positions JSONB NOT NULL,
               reconciliation JSONB NOT NULL
+            );
+            CREATE TABLE IF NOT EXISTS universe_screen (
+              symbol TEXT PRIMARY KEY, checked_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+              price DOUBLE PRECISION, avg_dollar_volume DOUBLE PRECISION,
+              selected BOOLEAN NOT NULL, reason TEXT NOT NULL
             );
         """)
 
@@ -115,13 +122,15 @@ def save_backtest(symbol: str, metrics: dict):
               metrics["max_drawdown"], metrics["sharpe"]))
 
 
-def reserve_order(client_order_id: str, signal_id: str, symbol: str, qty: float, pool: str) -> bool:
+def reserve_order(client_order_id: str, signal_id: str, symbol: str, qty: float,
+                  pool: str, stop_loss_pct: float) -> bool:
     with connect() as db:
         result = db.execute("""
-          INSERT INTO orders(client_order_id, signal_id, symbol, side, qty, pool, status)
-          VALUES (%s, %s, %s, 'buy', %s, %s, 'pending')
+          INSERT INTO orders(client_order_id, signal_id, symbol, side, qty, pool, status,
+                             stop_loss_pct)
+          VALUES (%s, %s, %s, 'buy', %s, %s, 'pending', %s)
           ON CONFLICT(client_order_id) DO NOTHING
-        """, (client_order_id, signal_id, symbol, qty, pool))
+        """, (client_order_id, signal_id, symbol, qty, pool, stop_loss_pct))
         return result.rowcount == 1
 
 
@@ -182,6 +191,17 @@ def managed_order_id(symbol: str, pool: str):
     return row["broker_order_id"] if row else None
 
 
+def managed_order_stop_loss_pct(symbol: str, pool: str):
+    with connect() as db:
+        row = db.execute("""
+          SELECT stop_loss_pct FROM orders
+          WHERE symbol=%s AND pool=%s AND stop_loss_pct IS NOT NULL
+            AND status IN ('accepted','filled','new','partially_filled','pending_new')
+          ORDER BY created_at DESC LIMIT 1
+        """, (symbol, pool)).fetchone()
+    return float(row["stop_loss_pct"]) if row else None
+
+
 def latest_backtest(symbol: str):
     with connect() as db:
         return db.execute("SELECT * FROM backtest_metrics WHERE symbol=%s", (symbol,)).fetchone()
@@ -190,3 +210,21 @@ def latest_backtest(symbol: str):
 def latest_account_snapshot():
     with connect() as db:
         return db.execute("SELECT * FROM account_snapshots ORDER BY captured_at DESC LIMIT 1").fetchone()
+
+
+def save_universe_snapshot(records: list[dict]):
+    with connect() as db:
+        db.execute("DELETE FROM universe_screen")
+        db.executemany("""
+          INSERT INTO universe_screen(symbol, price, avg_dollar_volume, selected, reason)
+          VALUES (%(symbol)s, %(price)s, %(avg_dollar_volume)s, %(selected)s, %(reason)s)
+        """, records)
+
+
+def latest_universe_snapshot() -> list[dict]:
+    with connect() as db:
+        rows = db.execute("""
+          SELECT symbol, checked_at, price, avg_dollar_volume, selected, reason
+          FROM universe_screen ORDER BY selected DESC, avg_dollar_volume DESC NULLS LAST, symbol
+        """).fetchall()
+    return list(rows)
