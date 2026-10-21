@@ -5,9 +5,9 @@
 - **Name:** `kube-trader-pipeline`
 - **Version:** 2.0.0
 - **Target:** Docker Compose or Kubernetes/Helm deployment
-- **Purpose:** Describe how the implemented data, signal, backtest, paper execution, allocation, reconciliation, and circuit-breaker workers operate.
+- **Purpose:** Describe how the implemented data, signal, backtest, paper/live execution, allocation, reconciliation, and circuit-breaker workers operate.
 
-This document describes repository behavior. It does not authorize live trading and does not claim the sample strategy is profitable.
+Paper trading is the default. Setting `ALPACA_PAPER=false` selects live trading when execution is enabled. This does not claim the sample strategy is profitable.
 
 ## Components and event flow
 
@@ -16,7 +16,7 @@ This document describes repository behavior. It does not authorize live trading 
 | Ingestion | `python -m app.services.ingestion` | Alpaca minute-bar WebSocket to PostgreSQL and Redis stream `market.bars` |
 | Signals and alpha factors | `python -m app.services.signals` | 5/20-bar SMA state changes and RSI(14); emits `buy`/`sell` events to `strategy.signals` |
 | Backtesting and risk metrics | `python -m app.services.backtesting` | Rolling 500-bar sample metrics: cumulative return, maximum drawdown, per-bar Sharpe |
-| Execution and automation | `python -m app.services.execution` | Account reconciliation, pool and risk checks, optional Alpaca paper bracket orders |
+| Execution and automation | `python -m app.services.execution` | Account reconciliation, pool and risk checks, optional Alpaca paper/live bracket orders |
 
 FastAPI is a separate service. Redis Streams decouple worker events; PostgreSQL persists bars, strategy state, metrics, reservations, account snapshots, allocation exposure, and daily risk state. The API's daily history cache uses SQLite on `/data`.
 
@@ -26,10 +26,10 @@ Alpaca's `StockDataStream` supplies minute bars. The configured feed defaults to
 
 | Setting | Default | Meaning |
 | --- | --- | --- |
-| `ALPACA_PAPER` | `true` | Required for the execution worker; false makes it stop |
-| `ALPACA_API_KEY`, `ALPACA_SECRET_KEY` | empty | Alpaca credentials; use paper credentials |
+| `ALPACA_PAPER` | `true` | `true` selects paper endpoint; `false` selects live endpoint |
+| `ALPACA_API_KEY`, `ALPACA_SECRET_KEY` | empty | Alpaca credentials matching the selected endpoint |
 | `MARKET_STREAM_ENABLED` | `false` | Allows the ingestion worker to start the stream |
-| `EXECUTION_ENABLED` | `false` | Allows signal-driven paper entries/exits |
+| `EXECUTION_ENABLED` | `false` | Allows signal-driven entries/exits on the selected endpoint |
 | `STOP_MANAGEMENT_ENABLED` | `false` | Repairs missing stops on bot-managed positions |
 | `ALPACA_DATA_FEED` | `iex` | Alpaca stock stream feed, `iex` or `sip` |
 | `MAX_TRADE_RISK_PCT` | `0.01` | Requested risk budget, capped in code at 1% of equity |
@@ -62,7 +62,7 @@ Each pool's target equity is `account_equity * target_ratio`. Broker position ma
 
 Only intraday signals are generated today. Swing and core budgets are reported but have no active signal strategies. Pool balances are virtual limits inside one brokerage account: the application does not transfer cash between accounts or automatically sell holdings to rebalance pool ratios.
 
-Buy signals submit long-only Alpaca market bracket orders in paper mode, with a stop-loss and take-profit child order. The execution worker ignores stale/future signals and will not enter when the US equity market is closed. A below-SMA signal closes a bot-managed position unless the daily breaker is active; existing broker-side bracket exits remain in place.
+Buy signals submit long-only Alpaca market bracket orders on the selected endpoint, with a stop-loss and take-profit child order. The execution worker ignores stale/future signals and will not enter when the US equity market is closed. A below-SMA signal closes a bot-managed position unless the daily breaker is active; existing broker-side bracket exits remain in place.
 
 ## Reconciliation and circuit breaker
 
@@ -80,4 +80,4 @@ The breaker does not terminate a pod, cancel bracket exits, or liquidate positio
 - `GET /account/reconciliation`: latest account and allocation snapshot.
 - `GET /risk`: current New York-date breaker state.
 
-Use `docker compose up --build` for the local stack. Kubernetes manifests live in `k8s/`; the Helm chart is in `helm/kube-trader/`. The API is internal by default. Configure paper credentials, webhook secrets, persistent storage, and private network access before enabling the stream or paper execution switches.
+Use `docker compose up --build` for the local stack. Kubernetes manifests live in `k8s/`; the Helm chart is in `helm/kube-trader/`. The API is internal by default. Configure credentials matching the selected Alpaca endpoint, webhook secrets, persistent storage, and private network access before enabling the stream or execution switches. Set `ALPACA_PAPER=false` only when live trading is intended; `EXECUTION_ENABLED` remains false by default.

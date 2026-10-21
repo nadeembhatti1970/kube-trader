@@ -11,6 +11,7 @@ config:
   marketStreamEnabled: false
   executionEnabled: false
   stopManagementEnabled: false
+  alpacaPaper: true
   alpacaDataFeed: iex
   defaultSymbols: AAPL,MSFT,SPY
   maxTradeRiskPct: "0.01"

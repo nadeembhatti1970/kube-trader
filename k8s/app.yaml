@@ -4,7 +4,7 @@ metadata:
   name: kube-trader-config
   namespace: kube-trader
 data:
-  ALPACA_PAPER: "true"
+  ALPACA_PAPER: "true" # Set to "false" only for intentional live trading.
   ALPACA_DATA_FEED: iex
   MARKET_DATA_PROVIDER: yfinance
   MARKET_STREAM_ENABLED: "false"

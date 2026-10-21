@@ -202,11 +202,12 @@ def place_entry(client_api: TradingClient, event: dict, signal_id: str,
             client_order_id=client_order_id,
         ))
         update_order(client_order_id, str(order.id), "accepted")
-        log.warning("Submitted paper bracket order %s %s qty=%s stop=%s target=%s",
-                    symbol, pool, qty, stop_price, take_profit_price)
+        mode = "paper" if settings.alpaca_paper else "LIVE"
+        log.warning("Submitted %s bracket order %s %s qty=%s stop=%s target=%s",
+                    mode, symbol, pool, qty, stop_price, take_profit_price)
     except Exception:
         update_order(client_order_id, None, "rejected")
-        log.exception("Paper order submission failed for %s", symbol)
+        log.exception("Alpaca order submission failed for %s", symbol)
 
 
 def handle_signal(client_api: TradingClient, event: dict, signal_id: str, risk: dict):
@@ -233,13 +234,15 @@ def handle_signal(client_api: TradingClient, event: dict, signal_id: str, risk: 
 
 def main():
     init_db()
-    if not settings.alpaca_paper:
-        raise RuntimeError("Live brokerage mode is unsupported; set ALPACA_PAPER=true")
     if not settings.alpaca_api_key or not settings.alpaca_secret_key:
         log.warning("Alpaca credentials missing; execution/reconciliation worker is idle")
         while True:
             time.sleep(60)
-    client_api = TradingClient(settings.alpaca_api_key, settings.alpaca_secret_key, paper=True)
+    mode = "paper" if settings.alpaca_paper else "LIVE"
+    log.warning("Starting Alpaca %s trading client; EXECUTION_ENABLED=%s",
+                mode, settings.execution_enabled)
+    client_api = TradingClient(settings.alpaca_api_key, settings.alpaca_secret_key,
+                               paper=settings.alpaca_paper)
     redis_client = client()
     ensure_group(redis_client, SIGNAL_STREAM, "execution-workers")
     consumer = f"execution-{uuid.uuid4()}"

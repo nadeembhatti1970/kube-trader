@@ -19,7 +19,7 @@ async def main():
         log.warning("Market stream is disabled; set MARKET_STREAM_ENABLED=true to start ingestion")
         await asyncio.sleep(60)
     if not settings.alpaca_api_key or not settings.alpaca_secret_key:
-        raise RuntimeError("Alpaca paper credentials are required for the intraday stream")
+        raise RuntimeError("Alpaca API credentials are required for the intraday stream")
     init_db()
     feed = DataFeed.SIP if settings.alpaca_data_feed.lower() == "sip" else DataFeed.IEX
     stream = StockDataStream(settings.alpaca_api_key, settings.alpaca_secret_key, feed=feed,

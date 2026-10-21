@@ -4,7 +4,7 @@ metadata:
   name: {{ include "kube-trader.fullname" . }}
 data:
   MARKET_DATA_PROVIDER: {{ .Values.config.marketDataProvider | quote }}
-  ALPACA_PAPER: "true"
+  ALPACA_PAPER: {{ .Values.config.alpacaPaper | quote }}
   ALPACA_DATA_FEED: {{ .Values.config.alpacaDataFeed | quote }}
   MARKET_STREAM_ENABLED: {{ .Values.config.marketStreamEnabled | quote }}
   EXECUTION_ENABLED: {{ .Values.config.executionEnabled | quote }}
