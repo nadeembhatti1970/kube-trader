@@ -2,6 +2,6 @@ apiVersion: v2
 name: kube-trader
 description: Self-hosted market data and automated trading starter
 type: application
-version: 0.1.0
+version: 0.1.1
 appVersion: "0.1.0"
 
