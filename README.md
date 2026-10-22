@@ -85,19 +85,15 @@ The API container needs PostgreSQL and Redis for the account, risk, and backtest
 
 ## Kubernetes manifests
 
-Build/publish the image and replace each `kube-trader:latest` in `k8s/app.yaml` with the registry image. Create the namespace and secret first. Never commit the secret:
+Build/publish the image and replace each `kube-trader:latest` in `k8s/app.yaml` with the registry image. Set `POSTGRES_DSN` in `.env` to use the in-cluster PostgreSQL service (`postgres` for these manifests). Create the namespace and Kubernetes Secret first:
 
 ```sh
 kubectl apply -f k8s/namespace.yaml
-kubectl -n kube-trader create secret generic kube-trader-secrets \
-  --from-literal=POSTGRES_PASSWORD='REPLACE_WITH_A_RANDOM_PASSWORD' \
-  --from-literal=POSTGRES_DSN='postgresql://kube_trader:REPLACE_WITH_A_RANDOM_PASSWORD@postgres:5432/kube_trader' \
-  --from-literal=ALPACA_API_KEY='' \
-  --from-literal=ALPACA_SECRET_KEY='' \
-  --from-literal=FINNHUB_API_KEY='' \
-  --from-literal=ALERT_WEBHOOK_URL=''
+bash ./create-k8s-secret.sh
 kubectl apply -f k8s/platform.yaml -f k8s/app.yaml
 ```
+
+The `create-k8s-secret.sh` utility creates or updates the Secret from only `POSTGRES_PASSWORD`, `POSTGRES_DSN`, `ALPACA_API_KEY`, `ALPACA_SECRET_KEY`, `FINNHUB_API_KEY`, and `ALERT_WEBHOOK_URL`; other application settings remain in the ConfigMap. Secret entries must use unquoted `KEY=value` lines. Use `--env-file`, `--namespace`, or `--secret-name` to override the defaults. Set `POSTGRES_DSN` to the chart's PostgreSQL service name when using Helm (for release `kube-trader`, this is `kube-trader-postgres`).
 
 Update both Postgres password and DSN using the same password. After adding credentials or changing ConfigMap values, restart the affected deployments so the pods receive the new environment. Use a cluster secret manager for real credentials. The API service is `ClusterIP`; expose it only through a private, authenticated path. SQLite's API history cache is a separate 2 GiB PVC. PostgreSQL and Redis each use persistent volumes.
 
@@ -116,9 +112,11 @@ Increment `version` in `helm/kube-trader/Chart.yaml` when releasing chart change
 
 ## Helm
 
-Prepare the `kube-trader-secrets` Secret in the release namespace with the same keys. Set `POSTGRES_DSN` to use the release's Postgres service name (for release `kube-trader`, that is `kube-trader-postgres`). Then install:
+Set `POSTGRES_DSN` in `.env` to use the release's Postgres service name (for release `kube-trader`, that is `kube-trader-postgres`). Create the namespace and Secret, then install:
 
 ```sh
+kubectl create namespace kube-trader --dry-run=client -o yaml | kubectl apply -f -
+bash ./create-k8s-secret.sh --namespace kube-trader
 helm upgrade --install kube-trader ./helm/kube-trader \
   --namespace kube-trader --create-namespace \
   --set image.repository=YOUR_REGISTRY/kube-trader \
@@ -162,4 +160,3 @@ The chart defaults to paper mode and all stream/execution switches to off. To en
 | `MAX_SIGNAL_AGE_SECONDS` | `180` | Reject older or future-dated signals |
 | `ALERT_WEBHOOK_URL` | empty | Optional generic JSON circuit-breaker webhook receiver |
 | `POSTGRES_DSN` / `REDIS_URL` | local defaults | Database and stream-broker connection strings |
-
