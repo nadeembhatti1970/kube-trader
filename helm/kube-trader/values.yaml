@@ -8,9 +8,9 @@ service:
   port: 80
 config:
   marketDataProvider: yfinance
-  marketStreamEnabled: false
-  executionEnabled: false
-  stopManagementEnabled: false
+  marketStreamEnabled: true
+  executionEnabled: true
+  stopManagementEnabled: true
   alpacaPaper: true
   alpacaDataFeed: iex
   etfHoldingsSymbol: SPY
