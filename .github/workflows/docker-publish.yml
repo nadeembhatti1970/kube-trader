@@ -13,7 +13,8 @@ on:
   workflow_dispatch:
 
 permissions:
-  contents: read
+  contents: write
+  actions: write
 
 concurrency:
   group: docker-publish-${{ github.ref }}
@@ -53,3 +54,41 @@ jobs:
           labels: ${{ steps.metadata.outputs.labels }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
+
+      - name: Update Helm chart image tag and version
+        id: chart
+        env:
+          IMAGE_TAG: sha-${{ github.sha }}
+        run: |
+          chart_file=helm/kube-trader/Chart.yaml
+          values_file=helm/kube-trader/values.yaml
+
+          chart_version="$(sed -n 's/^version: *"\{0,1\}\([0-9][0-9.]*\)"\{0,1\}$/\1/p' "$chart_file")"
+          if [[ ! "$chart_version" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "Unsupported Helm chart version: ${chart_version:-missing}" >&2
+            exit 1
+          fi
+
+          IFS=. read -r major minor patch <<< "$chart_version"
+          next_version="$major.$minor.$((patch + 1))"
+
+          sed -i "s/^  tag: .*/  tag: $IMAGE_TAG/" "$values_file"
+          sed -i "s/^version: .*/version: $next_version/" "$chart_file"
+
+          echo "version=$next_version" >> "$GITHUB_OUTPUT"
+
+      - name: Commit chart update
+        env:
+          IMAGE_TAG: sha-${{ github.sha }}
+          CHART_VERSION: ${{ steps.chart.outputs.version }}
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add helm/kube-trader/values.yaml helm/kube-trader/Chart.yaml
+          git commit -m "chore(helm): publish image $IMAGE_TAG as chart $CHART_VERSION"
+          git push
+
+      - name: Dispatch Helm chart publish
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh workflow run helm-publish.yml --ref main

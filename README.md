@@ -100,14 +100,14 @@ Update both Postgres password and DSN using the same password. After adding cred
 
 Dependabot checks GitHub Actions, Python requirements, Docker images in the root and Kubernetes manifests, and the Helm chart weekly on Sunday at 03:00 Europe/London, following the schedule used by `core-infra`.
 
-The Docker image workflow builds and pushes `DOCKERHUB_USERNAME/kube-trader:latest` and a commit-SHA tag when application code, requirements, or the Docker build files change on `main` (and can be started manually). The Helm workflow runs `helm lint`, packages `helm/kube-trader`, and pushes it as an OCI chart to `oci://registry-1.docker.io/DOCKERHUB_USERNAME` when chart files change on `main`.
+The Docker image workflow builds and pushes `DOCKERHUB_USERNAME/kube-trader:latest` and a commit-SHA tag when application code, requirements, or the Docker build files change on `main` (and can be started manually). After publishing, it updates `helm/kube-trader/values.yaml` to use that same SHA tag, increments the chart patch version in `Chart.yaml`, commits the change, and dispatches the Helm workflow. The Helm workflow runs `helm lint`, packages `helm/kube-trader`, and pushes it as an OCI chart to `oci://registry-1.docker.io/DOCKERHUB_USERNAME`. Manually changing the chart should still include an appropriate version bump.
 
 Add these repository Actions secrets before the first publish:
 
 - `DOCKERHUB_USERNAME`: the Docker Hub account or organization namespace.
 - `DOCKERHUB_TOKEN`: a Docker Hub personal access token with read/write access to repositories.
 
-Increment `version` in `helm/kube-trader/Chart.yaml` when releasing chart changes. Install the published chart with `helm upgrade --install kube-trader oci://registry-1.docker.io/DOCKERHUB_USERNAME/kube-trader --version CHART_VERSION --namespace kube-trader --create-namespace`, and set `image.repository` to `DOCKERHUB_USERNAME/kube-trader` with `image.tag` set to `latest` or a commit-SHA tag. Docker Hub supports Helm charts as OCI artifacts in the same repository namespace as the container image.
+The Docker workflow automatically increments the chart patch version when it updates the image tag; manually changing chart contents should also include an appropriate version bump. Install the published chart with `helm upgrade --install kube-trader oci://registry-1.docker.io/DOCKERHUB_USERNAME/kube-trader --version CHART_VERSION --namespace kube-trader --create-namespace`, and set `image.repository` to `DOCKERHUB_USERNAME/kube-trader`. The chart's default `image.tag` is updated to the published commit-SHA tag by the Docker workflow. Docker Hub supports Helm charts as OCI artifacts in the same repository namespace as the container image.
 
 ## Helm
 
