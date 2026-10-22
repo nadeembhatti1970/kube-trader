@@ -88,12 +88,11 @@ The API container needs PostgreSQL and Redis for the account, risk, and backtest
 Build/publish the image and replace each `kube-trader:latest` in `k8s/app.yaml` with the registry image. Set `POSTGRES_DSN` in `.env` to use the in-cluster PostgreSQL service (`postgres` for these manifests). Create the namespace and Kubernetes Secret first:
 
 ```sh
-kubectl apply -f k8s/namespace.yaml
 bash ./create-k8s-secret.sh
 kubectl apply -f k8s/platform.yaml -f k8s/app.yaml
 ```
 
-The `create-k8s-secret.sh` utility defaults to `.env` in the project root and reads the default namespace from `k8s/namespace.yaml`. It creates or updates the Secret from only `POSTGRES_PASSWORD`, `POSTGRES_DSN`, `ALPACA_API_KEY`, `ALPACA_SECRET_KEY`, `FINNHUB_API_KEY`, and `ALERT_WEBHOOK_URL`; other application settings remain in the ConfigMap. Secret entries must use unquoted `KEY=value` lines. Use `--env-file`, `--namespace`, or `--secret-name` to override the defaults. Set `POSTGRES_DSN` to the chart's PostgreSQL service name when using Helm (for release `kube-trader`, this is `kube-trader-postgres`).
+The `create-k8s-secret.sh` utility defaults to `.env` in the project root and reads the default namespace from `k8s/namespace.yaml`. It creates that namespace (or the namespace passed with `--namespace`) before creating or updating the Secret. It includes only `POSTGRES_PASSWORD`, `POSTGRES_DSN`, `ALPACA_API_KEY`, `ALPACA_SECRET_KEY`, `FINNHUB_API_KEY`, and `ALERT_WEBHOOK_URL`; other application settings remain in the ConfigMap. Secret entries must use unquoted `KEY=value` lines. Use `--env-file`, `--namespace`, or `--secret-name` to override the defaults. Set `POSTGRES_DSN` to the chart's PostgreSQL service name when using Helm (for release `kube-trader`, this is `kube-trader-postgres`).
 
 Update both Postgres password and DSN using the same password. After adding credentials or changing ConfigMap values, restart the affected deployments so the pods receive the new environment. Use a cluster secret manager for real credentials. The API service is `ClusterIP`; expose it only through a private, authenticated path. SQLite's API history cache is a separate 2 GiB PVC. PostgreSQL and Redis each use persistent volumes.
 
@@ -115,7 +114,6 @@ Increment `version` in `helm/kube-trader/Chart.yaml` when releasing chart change
 Set `POSTGRES_DSN` in `.env` to use the release's Postgres service name (for release `kube-trader`, that is `kube-trader-postgres`). Create the namespace and Secret, then install:
 
 ```sh
-kubectl create namespace kube-trader --dry-run=client -o yaml | kubectl apply -f -
 bash ./create-k8s-secret.sh
 helm upgrade --install kube-trader ./helm/kube-trader \
   --namespace kube-trader --create-namespace \

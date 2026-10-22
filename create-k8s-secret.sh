@@ -9,7 +9,7 @@ if [[ ! -f "$namespace_file" ]]; then
   exit 1
 fi
 
-namespace="$(awk '
+manifest_namespace="$(awk '
   /^metadata:[[:space:]]*$/ { in_metadata = 1; next }
   in_metadata && /^[^[:space:]#][^:]*:/ { exit }
   in_metadata && /^[[:space:]]+name:[[:space:]]*/ {
@@ -26,11 +26,12 @@ namespace="$(awk '
   exit 1
 }
 
-if [[ -z "$namespace" ]]; then
+if [[ -z "$manifest_namespace" ]]; then
   echo "Namespace manifest has an empty metadata.name: $namespace_file" >&2
   exit 1
 fi
 
+namespace="$manifest_namespace"
 secret_name="kube-trader-secrets"
 
 usage() {
@@ -134,6 +135,13 @@ awk '
     if (failed) exit 1
   }
 ' "$env_file" > "$secret_env"
+
+if [[ "$namespace" == "$manifest_namespace" ]]; then
+  kubectl apply -f "$namespace_file"
+else
+  kubectl create namespace "$namespace" --dry-run=client -o yaml |
+    kubectl apply -f -
+fi
 
 kubectl -n "$namespace" create secret generic "$secret_name" \
   --from-env-file="$secret_env" \
