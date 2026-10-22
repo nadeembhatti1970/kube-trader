@@ -10,7 +10,7 @@ config:
   marketDataProvider: yfinance
   marketStreamEnabled: true
   executionEnabled: true
-  stopManagementEnabled: true
+  stopManagementEnabled: false
   alpacaPaper: true
   alpacaDataFeed: iex
   etfHoldingsSymbol: SPY
