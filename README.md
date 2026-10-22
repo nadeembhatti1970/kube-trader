@@ -92,7 +92,15 @@ bash ./create-k8s-secret.sh
 kubectl apply -f k8s/platform.yaml -f k8s/app.yaml
 ```
 
-The `create-k8s-secret.sh` utility defaults to `.env` in the project root and reads the default namespace from `k8s/namespace.yaml`. It creates that namespace (or the namespace passed with `--namespace`) before creating or updating the Secret. It includes only `POSTGRES_PASSWORD`, `POSTGRES_DSN`, `ALPACA_API_KEY`, `ALPACA_SECRET_KEY`, `FINNHUB_API_KEY`, and `ALERT_WEBHOOK_URL`; other application settings remain in the ConfigMap. Secret entries must use unquoted `KEY=value` lines. Use `--env-file`, `--namespace`, or `--secret-name` to override the defaults. Set `POSTGRES_DSN` to the chart's PostgreSQL service name when using Helm (for release `kube-trader`, this is `kube-trader-postgres`).
+The `create-k8s-secret.sh` utility defaults to `.env` in the project root and reads the default namespace from `k8s/namespace.yaml`. It creates that namespace (or the namespace passed with `--namespace`) before creating or updating the Secret. It includes only `POSTGRES_PASSWORD`, `POSTGRES_DSN`, `ALPACA_API_KEY`, `ALPACA_SECRET_KEY`, `FINNHUB_API_KEY`, and `ALERT_WEBHOOK_URL`; other application settings remain in the ConfigMap. Secret entries must use unquoted `KEY=value` lines. Use `--env-file`, `--namespace`, or `--secret-name` to override the defaults.
+
+PostgreSQL's role and database are both named `kube_trader` (underscores are valid here); the Kubernetes Service uses a hyphenated name. For the default Helm release, use host `kube-trader-postgres`; for the raw manifests, use host `postgres`. For example, with Helm:
+
+```text
+POSTGRES_DSN=postgresql://kube_trader:<POSTGRES_PASSWORD>@kube-trader-postgres:5432/kube_trader
+```
+
+Replace the placeholder with the same password as `POSTGRES_PASSWORD`. URL-encode special characters in the password before putting it in the DSN.
 
 Update both Postgres password and DSN using the same password. After adding credentials or changing ConfigMap values, restart the affected deployments so the pods receive the new environment. Use a cluster secret manager for real credentials. The API service is `ClusterIP`; expose it only through a private, authenticated path. SQLite's API history cache is a separate 2 GiB PVC. PostgreSQL and Redis each use persistent volumes.
 
