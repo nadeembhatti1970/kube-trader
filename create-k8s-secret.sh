@@ -3,13 +3,41 @@ set -euo pipefail
 
 project_dir="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 env_file="$project_dir/.env"
-namespace="kube-trader"
+namespace_file="$project_dir/k8s/namespace.yaml"
+if [[ ! -f "$namespace_file" ]]; then
+  echo "Namespace manifest not found: $namespace_file" >&2
+  exit 1
+fi
+
+namespace="$(awk '
+  /^metadata:[[:space:]]*$/ { in_metadata = 1; next }
+  in_metadata && /^[^[:space:]#][^:]*:/ { exit }
+  in_metadata && /^[[:space:]]+name:[[:space:]]*/ {
+    sub(/^[[:space:]]+name:[[:space:]]*/, "")
+    sub(/[[:space:]]+#.*$/, "")
+    gsub(/^["\047]|["\047]$/, "")
+    print
+    found = 1
+    exit
+  }
+  END { if (!found) exit 1 }
+' "$namespace_file")" || {
+  echo "Could not read metadata.name from $namespace_file" >&2
+  exit 1
+}
+
+if [[ -z "$namespace" ]]; then
+  echo "Namespace manifest has an empty metadata.name: $namespace_file" >&2
+  exit 1
+fi
+
 secret_name="kube-trader-secrets"
 
 usage() {
   cat <<'EOF'
 Create or update the Kubernetes Secret from selected entries in .env.
 
+Defaults: .env and the namespace in k8s/namespace.yaml.
 Usage: ./create-k8s-secret.sh [--env-file PATH] [--namespace NAME] [--secret-name NAME]
 EOF
 }
