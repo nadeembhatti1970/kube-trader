@@ -27,7 +27,8 @@ def get_daily_bars(symbol: str, days: int, settings: Settings) -> list[dict]:
             )
         ]
     elif settings.market_data_provider.lower() == "yfinance":
-        frame = yf.download(symbol, start=start.isoformat(), end=end.isoformat(),
+        provider_symbol = symbol.replace(".", "-")
+        frame = yf.download(provider_symbol, start=start.isoformat(), end=end.isoformat(),
                             progress=False, auto_adjust=True, threads=False)
         if frame.empty:
             raise ValueError(f"No market data returned for {symbol}")
@@ -42,4 +43,3 @@ def get_daily_bars(symbol: str, days: int, settings: Settings) -> list[dict]:
     else:
         raise ValueError("MARKET_DATA_PROVIDER must be 'yfinance' or 'finnhub'")
     return rows[-days:]
-

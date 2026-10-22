@@ -215,7 +215,7 @@ def latest_account_snapshot():
 def save_universe_snapshot(records: list[dict]):
     with connect() as db:
         db.execute("DELETE FROM universe_screen")
-        db.executemany("""
+        db.cursor().executemany("""
           INSERT INTO universe_screen(symbol, price, avg_dollar_volume, selected, reason)
           VALUES (%(symbol)s, %(price)s, %(avg_dollar_volume)s, %(selected)s, %(reason)s)
         """, records)
