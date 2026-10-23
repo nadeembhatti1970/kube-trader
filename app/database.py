@@ -62,7 +62,31 @@ def init_db():
             CREATE TABLE IF NOT EXISTS account_snapshots (
               captured_at TIMESTAMPTZ PRIMARY KEY, equity DOUBLE PRECISION NOT NULL,
               buying_power DOUBLE PRECISION NOT NULL, positions JSONB NOT NULL,
-              reconciliation JSONB NOT NULL
+              reconciliation JSONB NOT NULL, alpaca_account JSONB NOT NULL DEFAULT '{}',
+              open_orders JSONB NOT NULL DEFAULT '[]', orders JSONB NOT NULL DEFAULT '[]',
+              trading_mode TEXT
+            );
+            ALTER TABLE account_snapshots ADD COLUMN IF NOT EXISTS alpaca_account JSONB
+              NOT NULL DEFAULT '{}';
+            ALTER TABLE account_snapshots ADD COLUMN IF NOT EXISTS open_orders JSONB
+              NOT NULL DEFAULT '[]';
+            ALTER TABLE account_snapshots ADD COLUMN IF NOT EXISTS orders JSONB
+              NOT NULL DEFAULT '[]';
+            ALTER TABLE account_snapshots ADD COLUMN IF NOT EXISTS trading_mode TEXT;
+            CREATE TABLE IF NOT EXISTS broker_activities (
+              activity_id TEXT PRIMARY KEY, activity_type TEXT NOT NULL,
+              activity_at TIMESTAMPTZ, order_id TEXT, symbol TEXT, side TEXT,
+              qty DOUBLE PRECISION, price DOUBLE PRECISION, net_amount DOUBLE PRECISION,
+              raw JSONB NOT NULL
+            );
+            CREATE INDEX IF NOT EXISTS broker_activities_type_time
+              ON broker_activities(activity_type, activity_at DESC);
+            CREATE INDEX IF NOT EXISTS broker_activities_order
+              ON broker_activities(order_id);
+            CREATE TABLE IF NOT EXISTS broker_activity_sync (
+              activity_type TEXT PRIMARY KEY, last_attempt_at TIMESTAMPTZ,
+              last_success_at TIMESTAMPTZ, last_synced_at TIMESTAMPTZ,
+              last_error TEXT
             );
             CREATE TABLE IF NOT EXISTS universe_screen (
               symbol TEXT PRIMARY KEY, checked_at TIMESTAMPTZ NOT NULL DEFAULT now(),
@@ -248,11 +272,113 @@ def save_risk_state(session_date, equity: float, halted: bool, reason: str | Non
         """, (session_date, equity, halted, reason))
 
 
-def save_account_snapshot(equity: float, buying_power: float, positions: list[dict], diffs: dict):
+def save_account_snapshot(equity: float, buying_power: float, positions: list[dict], diffs: dict,
+                          alpaca_account: dict | None = None,
+                          open_orders: list[dict] | None = None,
+                          orders: list[dict] | None = None,
+                          trading_mode: str | None = None):
     with connect() as db:
-        db.execute("INSERT INTO account_snapshots VALUES (%s, %s, %s, %s, %s)",
-                   (datetime.now(timezone.utc), equity, buying_power,
-                    json.dumps(positions), json.dumps(diffs)))
+        db.execute("""
+          INSERT INTO account_snapshots(
+            captured_at, equity, buying_power, positions, reconciliation,
+            alpaca_account, open_orders, orders, trading_mode
+          ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
+        """, (datetime.now(timezone.utc), equity, buying_power,
+              json.dumps(positions), json.dumps(diffs), json.dumps(alpaca_account or {}),
+              json.dumps(open_orders or []), json.dumps(orders or []), trading_mode))
+
+
+def update_latest_account_orders(orders: list[dict]):
+    with connect() as db:
+        db.execute("""
+          UPDATE account_snapshots SET orders=%s
+          WHERE captured_at=(SELECT captured_at FROM account_snapshots
+                             ORDER BY captured_at DESC LIMIT 1)
+        """, (json.dumps(orders),))
+
+
+def save_broker_activities(activities: list[dict]):
+    if not activities:
+        return
+    rows = []
+    for activity in activities:
+        activity_at = activity.get("transaction_time") or activity.get("date")
+        rows.append({
+            "activity_id": activity["id"],
+            "activity_type": activity["activity_type"],
+            "activity_at": activity_at,
+            "order_id": activity.get("order_id"),
+            "symbol": activity.get("symbol"),
+            "side": activity.get("side"),
+            "qty": activity.get("qty"),
+            "price": activity.get("price"),
+            "net_amount": activity.get("net_amount"),
+            "raw": json.dumps(activity),
+        })
+    with connect() as db:
+        db.cursor().executemany("""
+          INSERT INTO broker_activities(
+            activity_id, activity_type, activity_at, order_id, symbol, side,
+            qty, price, net_amount, raw
+          ) VALUES (
+            %(activity_id)s, %(activity_type)s, %(activity_at)s, %(order_id)s,
+            %(symbol)s, %(side)s, %(qty)s, %(price)s, %(net_amount)s, %(raw)s
+          )
+          ON CONFLICT(activity_id) DO UPDATE SET
+            activity_type=excluded.activity_type, activity_at=excluded.activity_at,
+            order_id=excluded.order_id, symbol=excluded.symbol, side=excluded.side,
+            qty=excluded.qty, price=excluded.price, net_amount=excluded.net_amount,
+            raw=excluded.raw
+        """, rows)
+
+
+def update_broker_activity_sync(activity_type: str, attempted_at: datetime,
+                                successful: bool, error: str | None = None):
+    with connect() as db:
+        db.execute("""
+          INSERT INTO broker_activity_sync(
+            activity_type, last_attempt_at, last_success_at, last_synced_at, last_error
+          ) VALUES (%s, %s, %s, %s, %s)
+          ON CONFLICT(activity_type) DO UPDATE SET
+            last_attempt_at=excluded.last_attempt_at,
+            last_success_at=COALESCE(excluded.last_success_at,
+                                     broker_activity_sync.last_success_at),
+            last_synced_at=COALESCE(excluded.last_synced_at,
+                                    broker_activity_sync.last_synced_at),
+            last_error=excluded.last_error
+        """, (
+            activity_type, attempted_at, attempted_at if successful else None,
+            attempted_at if successful else None, error,
+        ))
+
+
+def broker_activity_sync_status() -> list[dict]:
+    with connect() as db:
+        return db.execute("""
+          SELECT activity_type, last_attempt_at, last_success_at, last_synced_at, last_error
+          FROM broker_activity_sync ORDER BY activity_type
+        """).fetchall()
+
+
+def broker_activity_summary() -> list[dict]:
+    with connect() as db:
+        return db.execute("""
+          SELECT activity_type, COUNT(*) AS count, MAX(activity_at) AS latest_activity_at,
+                 SUM(net_amount) AS net_amount_total
+          FROM broker_activities
+          GROUP BY activity_type ORDER BY activity_type
+        """).fetchall()
+
+
+def latest_broker_activities(limit: int = 500) -> list[dict]:
+    with connect() as db:
+        return db.execute("""
+          SELECT activity_id, activity_type, activity_at, order_id, symbol, side,
+                 qty, price, net_amount, raw
+          FROM broker_activities
+          ORDER BY activity_at DESC NULLS LAST, activity_id DESC
+          LIMIT %s
+        """, (limit,)).fetchall()
 
 
 def managed_symbols() -> set[str]:

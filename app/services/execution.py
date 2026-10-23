@@ -4,7 +4,7 @@ import logging
 import math
 import time
 import uuid
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from zoneinfo import ZoneInfo
 
 import httpx
@@ -15,10 +15,14 @@ from alpaca.trading.requests import (GetOrdersRequest, MarketOrderRequest, StopL
                                      GetPortfolioHistoryRequest, StopOrderRequest,
                                      TakeProfitRequest)
 
-from app.database import (get_risk_state, init_db, managed_order_id, managed_order_stop_loss_pct,
-                          managed_order_roots, managed_orders,
-                          managed_pool_assignments, managed_symbols, reserve_order,
-                          save_account_snapshot, save_risk_state, sync_managed_orders,
+from app.alpaca_reporting import (fetch_account_activities, serialize_account,
+                                 serialize_order, serialize_position)
+from app.database import (broker_activity_sync_status, get_risk_state, init_db,
+                          managed_order_id, managed_order_stop_loss_pct,
+                          managed_order_roots, managed_orders, managed_pool_assignments,
+                          managed_symbols, reserve_order, save_account_snapshot,
+                          save_broker_activities, save_risk_state, sync_managed_orders,
+                          update_broker_activity_sync, update_latest_account_orders,
                           update_order)
 from app.settings import get_settings
 from app.streams import SIGNAL_STREAM, client, ensure_group, read_group
@@ -29,6 +33,7 @@ log = logging.getLogger("execution")
 settings = get_settings()
 NY = ZoneInfo("America/New_York")
 POOL_WEIGHTS = {"intraday": 0.20, "swing": 0.30, "core": 0.50}
+ACCOUNT_ACTIVITY_TYPES = ("FILL", "TRANS", "MISC")
 
 
 def pool_weights():
@@ -47,6 +52,45 @@ def broker_order_type(order):
     if raw_type is None:
         return None
     return str(getattr(raw_type, "value", raw_type)).lower()
+
+
+def sync_broker_account_activities():
+    if settings.alpaca_activity_sync_seconds < 1:
+        raise ValueError("ALPACA_ACTIVITY_SYNC_SECONDS must be at least 1")
+    if settings.alpaca_activity_lookback_days < 1:
+        raise ValueError("ALPACA_ACTIVITY_LOOKBACK_DAYS must be at least 1")
+    base_url = ("https://paper-api.alpaca.markets" if settings.alpaca_paper
+                else "https://api.alpaca.markets")
+    headers = {
+        "APCA-API-KEY-ID": settings.alpaca_api_key,
+        "APCA-API-SECRET-KEY": settings.alpaca_secret_key,
+    }
+    last_synced_by_type = {
+        row["activity_type"]: row["last_synced_at"]
+        for row in broker_activity_sync_status()
+    }
+    now = datetime.now(timezone.utc)
+    initial_after = now - timedelta(days=settings.alpaca_activity_lookback_days)
+    with httpx.Client(base_url=base_url, headers=headers, timeout=15.0) as http_client:
+        for activity_type in ACCOUNT_ACTIVITY_TYPES:
+            last_synced = last_synced_by_type.get(activity_type)
+            after = (last_synced - timedelta(minutes=5)
+                     if last_synced is not None else initial_after)
+            attempted_at = datetime.now(timezone.utc)
+            try:
+                activities = fetch_account_activities(
+                    http_client, activity_type, after,
+                )
+                save_broker_activities(activities)
+                update_broker_activity_sync(activity_type, attempted_at, True)
+            except Exception as exc:
+                update_broker_activity_sync(
+                    activity_type, attempted_at, False, str(exc)[:1000],
+                )
+                log.exception(
+                    "Alpaca %s account activity sync failed; reports may be stale",
+                    activity_type,
+                )
 
 
 def open_closing_orders(client_api: TradingClient, symbol: str, closing_side: OrderSide):
@@ -158,6 +202,9 @@ def refresh_tracked_order_statuses(client_api: TradingClient, open_orders=None):
         if metadata is not None:
             sync_tree(order, metadata, is_root=True)
     sync_managed_orders(order_records)
+    update_latest_account_orders([
+        serialize_order(order) for order in orders_by_id.values()
+    ])
 
 
 def close_managed_position(client_api: TradingClient, symbol: str, pool: str,
@@ -274,9 +321,14 @@ def reconcile(client_api: TradingClient):
         qty = float(position.qty)
         avg_entry = float(position.avg_entry_price)
         close_side = OrderSide.SELL if qty > 0 else OrderSide.BUY
-        broker_positions.append({"symbol": symbol, "qty": qty,
-                                 "market_value": float(position.market_value),
-                                 "avg_entry_price": avg_entry})
+        position_report = serialize_position(position)
+        position_report.update({
+            "symbol": symbol,
+            "qty": qty,
+            "market_value": float(position.market_value),
+            "avg_entry_price": avg_entry,
+        })
+        broker_positions.append(position_report)
         pool = pool_by_symbol.get(symbol, "core")
         exposures[pool] += abs(float(position.market_value))
         sector = sector_for_symbol(symbol, settings)
@@ -321,7 +373,13 @@ def reconcile(client_api: TradingClient):
              "managed_positions_missing_at_broker": sorted(known - broker_symbols),
              "positions_missing_protective_stop": stop_gaps,
              "allocations": allocations, "sector_exposures": sector_exposures}
-    save_account_snapshot(equity, buying_power, broker_positions, diffs)
+    save_account_snapshot(
+        equity, buying_power, broker_positions, diffs,
+        alpaca_account=serialize_account(account),
+        open_orders=[serialize_order(order) for order in open_orders],
+        orders=[serialize_order(order) for order in open_orders],
+        trading_mode="paper" if settings.alpaca_paper else "live",
+    )
 
     today = datetime.now(NY).date()
     state = get_risk_state(today)
@@ -545,6 +603,7 @@ def main():
     ensure_group(redis_client, SIGNAL_STREAM, "execution-workers")
     consumer = f"execution-{uuid.uuid4()}"
     last_reconcile = 0.0
+    last_activity_sync = 0.0
     risk = {"halted": False}
     while True:
         if time.monotonic() - last_reconcile >= settings.reconcile_interval_seconds:
@@ -555,6 +614,12 @@ def main():
                 log.exception("Broker reconciliation failed; no entries will be processed")
                 risk = {"halted": True, "equity": 0.0, "buying_power": 0.0}
             last_reconcile = time.monotonic()
+        if time.monotonic() - last_activity_sync >= settings.alpaca_activity_sync_seconds:
+            try:
+                sync_broker_account_activities()
+            except Exception:
+                log.exception("Alpaca account activity synchronization failed")
+            last_activity_sync = time.monotonic()
         batches = read_group(redis_client, "execution-workers", consumer, SIGNAL_STREAM,
                              count=20, block=5000)
         for _, messages in batches:

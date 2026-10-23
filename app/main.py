@@ -5,7 +5,8 @@ from pydantic import BaseModel
 
 from app.market_data import get_daily_bars
 from app.database import (connect, get_risk_state, latest_account_snapshot, latest_backtest,
-                          latest_universe_snapshot, managed_fills, recent_closes)
+                          latest_broker_activities, latest_universe_snapshot, managed_fills,
+                          broker_activity_summary, broker_activity_sync_status, recent_closes)
 from app.research import evaluate_walk_forward
 from app.settings import get_settings
 from app.storage import store_bars
@@ -147,6 +148,37 @@ def account_reconciliation():
         raise
     except Exception as exc:
         raise HTTPException(status_code=503, detail="Account database is unavailable") from exc
+
+
+@app.get("/account/broker")
+def broker_account_report(limit: int = Query(default=200, ge=1, le=1000)):
+    try:
+        snapshot = latest_account_snapshot()
+        if snapshot is None:
+            raise HTTPException(status_code=404, detail="No broker reconciliation has run yet")
+        activity_types = broker_activity_summary()
+        return {
+            "captured_at": snapshot["captured_at"],
+            "trading_mode": snapshot["trading_mode"],
+            "account": snapshot["alpaca_account"],
+            "equity": snapshot["equity"],
+            "buying_power": snapshot["buying_power"],
+            "positions": snapshot["positions"],
+            "open_orders": snapshot["open_orders"],
+            "orders": snapshot["orders"],
+            "orders_may_be_truncated": len(snapshot["orders"]) >= 500,
+            "reconciliation": snapshot["reconciliation"],
+            "activity_ledger": {
+                "total_stored": sum(row["count"] for row in activity_types),
+                "by_type": activity_types,
+                "sync_status": broker_activity_sync_status(),
+                "recent_activities": latest_broker_activities(limit),
+            },
+        }
+    except HTTPException:
+        raise
+    except Exception as exc:
+        raise HTTPException(status_code=503, detail="Broker report is unavailable") from exc
 
 
 @app.get("/trades")

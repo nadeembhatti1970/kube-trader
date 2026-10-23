@@ -41,6 +41,7 @@ New orders are constrained by pool budget, buying power, `MAX_OPEN_POSITIONS`, p
 - **Managed exits:** before closing a managed position, the worker cancels attached exit legs and waits up to five seconds for all closing-side open orders on that symbol to clear. If any remain, it defers the close and leaves the signal pending for retry; it does not cancel unrelated orders.
 - **Order observability:** order submission, duplicate suppression, submission errors, broker status changes, and fill progress are logged with UTC timestamps, signal timestamps, signal IDs, client and broker order IDs, symbol, pool, and status. Reconciliation captures managed parent and attached child order fills, including broker submission/fill times, aggregate filled quantity, average price, order type, fees when exposed by the broker model, and entry/exit reference-price slippage when available. Entry reference prices are paired with the source bar timestamp. If a submission request fails before its outcome is known, it remains tracked and is looked up by client order ID instead of being mislabeled as rejected.
 - **Trade report:** `/trades` matches managed buy/sell fills FIFO by symbol and strategy pool. It reports gross realized P&L, holding time, signal-to-fill delay, adverse entry/exit slippage, and summaries by strategy, symbol, and entry/exit order type. Fee amounts are allocated proportionally across matched quantities; net realized P&L is reported only when fee data is available for both sides of every matched slice, never treating unknown fees as zero. The installed Alpaca order model may not expose fees, so net P&L can remain null until fee data is supplied. Broker fill prices already reflect execution prices, so slippage is not subtracted a second time. The report uses aggregate order fills and does not include taxes or other account adjustments; unmatched exits and remaining managed quantities are surfaced separately. It is a measurement aid, not a profitability guarantee.
+- **Alpaca account report:** `/account/broker` returns the latest account and position snapshot, open/recent orders, stored `FILL`/`TRANS`/`MISC` activities, per-category sync status, and activity totals. This is sensitive financial data; expose it only through a private, authenticated path. Account snapshots follow the reconciliation interval. Activity synchronization is separate: `ALPACA_ACTIVITY_SYNC_SECONDS` defaults to 300 seconds, with `ALPACA_ACTIVITY_LOOKBACK_DAYS` defaulting to 30 days for the initial history window. Incremental sync overlaps by five minutes to accommodate delayed activities, so activity and account snapshot timestamps can differ; review the response timestamps and sync status when reconciling. Recent order history is limited to 500 orders and `orders_may_be_truncated` indicates when the limit is reached. Broker activities are retained separately and do not by themselves make order-linked fees available to `/trades`.
 - **Duplicate protection:** entry reservations use deterministic Alpaca client order IDs and a PostgreSQL uniqueness constraint. Redis events are acknowledged after processing.
 
 This is a starter implementation, not a validated strategy or a production brokerage platform. The rolling backtest covers only the intraday SMA strategy and omits fees, slippage, survivorship bias, corporate actions, and out-of-sample validation; swing and core rules have not been backtested by this worker. It does not short securities, stream Finnhub data, execute intraday account cash transfers, or send alerts outside configured webhooks/container logs. Stop orders cannot guarantee a fill price. Start with paper credentials and inspect orders, account state, and market-data terms before relying on the system.
@@ -72,6 +73,7 @@ curl http://localhost:8000/backtests/AAPL
 curl http://localhost:8000/research/backtests/AAPL
 curl http://localhost:8000/universe
 curl http://localhost:8000/account/reconciliation
+curl http://localhost:8000/account/broker
 curl http://localhost:8000/trades
 curl http://localhost:8000/risk
 ```
@@ -169,6 +171,8 @@ The chart defaults to paper mode and all stream/execution switches to off. To en
 | `BACKTEST_COST_BPS` / `BACKTEST_TRAIN_FRACTION` | `5` / `0.70` | Research endpoint's estimated one-way costs and chronological train split |
 | `INTRADAY_BACKTEST_BARS` | `50000` | Maximum locally stored minute bars used by research backtests |
 | `RECONCILE_INTERVAL_SECONDS` | `30` | Brokerage reconciliation interval |
+| `ALPACA_ACTIVITY_SYNC_SECONDS` | `300` | Interval for syncing Alpaca `FILL`, `TRANS`, and `MISC` account activities |
+| `ALPACA_ACTIVITY_LOOKBACK_DAYS` | `30` | Initial Alpaca account-activity history window |
 | `MAX_SIGNAL_AGE_SECONDS` | `180` | Reject older or future-dated signals |
 | `ALERT_WEBHOOK_URL` | empty | Optional generic JSON circuit-breaker webhook receiver |
 | `POSTGRES_DSN` / `REDIS_URL` | local defaults | Database and stream-broker connection strings |

@@ -43,6 +43,8 @@ class Settings(BaseSettings):
     backtest_train_fraction: float = 0.70
     intraday_backtest_bars: int = 50_000
     alpaca_data_feed: str = "iex"
+    alpaca_activity_sync_seconds: int = 300
+    alpaca_activity_lookback_days: int = 30
     reconcile_interval_seconds: int = 30
     max_signal_age_seconds: int = 180
     alert_webhook_url: str = ""
@@ -53,4 +55,3 @@ class Settings(BaseSettings):
 @lru_cache
 def get_settings() -> Settings:
     return Settings()
-

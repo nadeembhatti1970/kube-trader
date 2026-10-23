@@ -157,6 +157,11 @@ class CloseManagedPositionTests(unittest.TestCase):
 
 class RefreshTrackedOrderStatusesTests(unittest.TestCase):
     def setUp(self):
+        update_orders_patcher = patch(
+            "app.services.execution.update_latest_account_orders"
+        )
+        self.update_latest_orders = update_orders_patcher.start()
+        self.addCleanup(update_orders_patcher.stop)
         self.root = {
             "client_order_id": "client-1",
             "broker_order_id": "broker-1",
@@ -219,6 +224,7 @@ class RefreshTrackedOrderStatusesTests(unittest.TestCase):
         self.assertIn("broker_order_id=broker-1", captured.output[0])
         self.assertIn("status=filled", captured.output[0])
         self.assertIn("filled_avg_price=190.25", captured.output[0])
+        self.update_latest_orders.assert_called_once()
 
     @patch("app.services.execution.sync_managed_orders")
     @patch("app.services.execution.managed_orders")
