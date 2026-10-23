@@ -50,6 +50,47 @@ def _grouped_summary(trades: list[dict], key_for_trade) -> dict:
     return {key: _summarize(group) for key, group in sorted(groups.items())}
 
 
+def reconcile_open_quantities(ledger_open: list[dict], broker_positions: list[dict],
+                              tolerance: float = 1e-6) -> dict:
+    """Compare ledger open lots with Alpaca positions, treating Alpaca as the source of truth."""
+    lots_by_symbol = defaultdict(list)
+    for lot in ledger_open:
+        lots_by_symbol[lot["symbol"]].append(dict(lot))
+    broker = {item["symbol"]: float(item["qty"]) for item in broker_positions}
+    discrepancies = []
+    adjusted = []
+    for symbol in sorted(set(lots_by_symbol) | set(broker)):
+        lots = lots_by_symbol.get(symbol, [])
+        ledger_qty = sum(lot["open_quantity"] for lot in lots)
+        broker_qty = broker.get(symbol, 0.0)
+        if abs(ledger_qty - broker_qty) > tolerance:
+            if broker_qty <= tolerance:
+                status = "missing_at_broker"
+            elif ledger_qty <= tolerance:
+                status = "untracked_at_broker"
+            elif ledger_qty > broker_qty:
+                status = "ledger_exceeds_broker"
+            else:
+                status = "broker_exceeds_ledger"
+            discrepancies.append({
+                "symbol": symbol,
+                "pools": sorted({lot["pool"] for lot in lots}),
+                "ledger_quantity": ledger_qty,
+                "broker_quantity": broker_qty,
+                "difference": broker_qty - ledger_qty,
+                "status": status,
+            })
+        remaining = max(broker_qty, 0.0)
+        for lot in lots:
+            quantity = min(lot["open_quantity"], remaining)
+            remaining -= quantity
+            if quantity > tolerance:
+                adjusted.append({**lot, "open_quantity": quantity})
+        if remaining > tolerance:
+            adjusted.append({"symbol": symbol, "pool": "unattributed", "open_quantity": remaining})
+    return {"discrepancies": discrepancies, "open_quantities": adjusted}
+
+
 def build_realized_trade_report(fills: list[dict]) -> dict:
     """Match managed buy/sell fills FIFO and report realized execution metrics."""
     inventory = defaultdict(deque)
@@ -205,4 +246,14 @@ def build_realized_trade_report(fills: list[dict]) -> dict:
         "fees_complete": bool(trades) and all(trade["fees"] is not None for trade in trades),
         "open_managed_quantities": open_positions,
         "unmatched_exit_fills": unmatched_exits,
+        "data_quality": {
+            "slices_missing_entry_signal_timestamp": sum(
+                trade["entry_signal_timestamp"] is None for trade in trades),
+            "slices_missing_exit_signal_timestamp": sum(
+                trade["exit_signal_timestamp"] is None for trade in trades),
+            "slices_unknown_order_type": sum(
+                trade["entry_order_type"] is None or trade["exit_order_type"] is None
+                for trade in trades),
+            "slices_missing_fees": sum(trade["fees"] is None for trade in trades),
+        },
     }

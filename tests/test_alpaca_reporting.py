@@ -87,7 +87,7 @@ class AlpacaReportingTests(unittest.TestCase):
 
     def test_broker_report_includes_account_data_and_truncation_flag(self):
         snapshot = {
-            "captured_at": "2025-01-01T00:00:00+00:00",
+            "captured_at": datetime(2025, 1, 1, tzinfo=timezone.utc),
             "trading_mode": "paper",
             "alpaca_account": {"status": "ACTIVE"},
             "equity": 1000.0,
@@ -108,6 +108,8 @@ class AlpacaReportingTests(unittest.TestCase):
         self.assertTrue(report["orders_may_be_truncated"])
         self.assertEqual(report["account"], {"status": "ACTIVE"})
         self.assertEqual(report["activity_ledger"]["total_stored"], 0)
+        self.assertEqual(report["configured_trading_mode"], "paper")
+        self.assertTrue(any("old" in warning for warning in report["warnings"]))
 
 
 if __name__ == "__main__":

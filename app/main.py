@@ -1,19 +1,30 @@
 from datetime import datetime, timezone
 
-from fastapi import FastAPI, HTTPException, Query
+from fastapi import FastAPI, HTTPException, Query, Request
 from pydantic import BaseModel
 
 from app.market_data import get_daily_bars
 from app.database import (connect, get_risk_state, latest_account_snapshot, latest_backtest,
                           latest_broker_activities, latest_universe_snapshot, managed_fills,
                           broker_activity_summary, broker_activity_sync_status, recent_closes)
+from app.export_names import export_filename
 from app.research import evaluate_walk_forward
 from app.settings import get_settings
 from app.storage import store_bars
-from app.trade_accounting import build_realized_trade_report
+from app.trade_accounting import build_realized_trade_report, reconcile_open_quantities
 
 settings = get_settings()
 app = FastAPI(title="Kube Trader", version=settings.app_version)
+SNAPSHOT_STALE_SECONDS = max(120, settings.reconcile_interval_seconds * 4)
+
+
+@app.middleware("http")
+async def name_exported_reports(request: Request, call_next):
+    response = await call_next(request)
+    filename = export_filename(request.url.path) if request.method == "GET" else None
+    if filename and response.status_code == 200:
+        response.headers["Content-Disposition"] = f'inline; filename="{filename}"'
+    return response
 
 
 class Signal(BaseModel):
@@ -157,9 +168,30 @@ def broker_account_report(limit: int = Query(default=200, ge=1, le=1000)):
         if snapshot is None:
             raise HTTPException(status_code=404, detail="No broker reconciliation has run yet")
         activity_types = broker_activity_summary()
+        sync_status = broker_activity_sync_status()
+        captured_at = snapshot["captured_at"]
+        age_seconds = (datetime.now(timezone.utc) - captured_at).total_seconds()
+        warnings = list(snapshot["reconciliation"].get("warnings", []))
+        if age_seconds > SNAPSHOT_STALE_SECONDS:
+            warnings.append(
+                f"Account snapshot is {age_seconds:.0f}s old; check that the execution worker "
+                "is running before relying on this report")
+        if snapshot["trading_mode"] is None or not snapshot["alpaca_account"]:
+            warnings.append(
+                "Snapshot has no recorded trading mode or account details; it predates those "
+                "fields or the worker has not completed a reconciliation since upgrading")
+        synced_after = [row["last_success_at"] for row in sync_status
+                        if row.get("last_success_at") and row["last_success_at"] > captured_at]
+        if synced_after:
+            warnings.append(
+                "Activity ledger was synced after the account snapshot was captured; "
+                "the sections are not from the same instant")
         return {
-            "captured_at": snapshot["captured_at"],
+            "captured_at": captured_at,
+            "snapshot_age_seconds": age_seconds,
+            "warnings": warnings,
             "trading_mode": snapshot["trading_mode"],
+            "configured_trading_mode": "paper" if settings.alpaca_paper else "live",
             "account": snapshot["alpaca_account"],
             "equity": snapshot["equity"],
             "buying_power": snapshot["buying_power"],
@@ -171,7 +203,7 @@ def broker_account_report(limit: int = Query(default=200, ge=1, le=1000)):
             "activity_ledger": {
                 "total_stored": sum(row["count"] for row in activity_types),
                 "by_type": activity_types,
-                "sync_status": broker_activity_sync_status(),
+                "sync_status": sync_status,
                 "recent_activities": latest_broker_activities(limit),
             },
         }
@@ -188,6 +220,19 @@ def trade_report(limit: int = Query(default=100, ge=1, le=1000)):
         all_trades = report["trades"]
         report["total_closed_trade_slices"] = len(all_trades)
         report["trades"] = all_trades[-limit:]
+        snapshot = latest_account_snapshot()
+        report["ledger_open_quantities"] = report["open_managed_quantities"]
+        if snapshot is None:
+            report["ledger_discrepancies"] = None
+            report["open_quantities_basis"] = "order ledger only; no Alpaca snapshot available"
+        else:
+            check = reconcile_open_quantities(report["ledger_open_quantities"],
+                                              snapshot["positions"])
+            report["open_managed_quantities"] = check["open_quantities"]
+            report["ledger_discrepancies"] = check["discrepancies"]
+            report["open_quantities_basis"] = (
+                "Alpaca positions at " + snapshot["captured_at"].isoformat()
+                + "; ledger quantities above broker holdings are excluded")
         return report
     except Exception as exc:
         raise HTTPException(status_code=503, detail="Trade report is unavailable") from exc

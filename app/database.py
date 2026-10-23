@@ -382,9 +382,15 @@ def latest_broker_activities(limit: int = 500) -> list[dict]:
 
 
 def managed_symbols() -> set[str]:
+    """Symbols with a net open filled quantity or a live unfilled entry; closed ones are excluded."""
     with connect() as db:
-        rows = db.execute("SELECT DISTINCT symbol FROM orders WHERE status IN "
-                          "('accepted','filled','new','partially_filled','pending_new')").fetchall()
+        rows = db.execute("""
+          SELECT symbol FROM orders GROUP BY symbol
+          HAVING SUM(CASE WHEN side='buy' THEN COALESCE(filled_qty, 0)
+                          WHEN side='sell' THEN -COALESCE(filled_qty, 0) ELSE 0 END) > 0.000001
+            OR BOOL_OR(side='buy' AND COALESCE(filled_qty, 0) = 0
+                       AND status IN ('accepted','new','partially_filled','pending_new'))
+        """).fetchall()
     return {row["symbol"] for row in rows}
 
 

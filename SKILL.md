@@ -83,7 +83,7 @@ Intraday buy signals submit long-only Alpaca market bracket orders on the select
 
 ## Reconciliation and circuit breaker
 
-Every reconciliation reads Alpaca account equity, buying power, positions, and open nested orders. It stores account snapshots, reports untracked/missing positions and pool exposures, and identifies absent protective stops. With `STOP_MANAGEMENT_ENABLED=true`, it submits a protective stop for a bot-managed position missing an open stop order.
+Every reconciliation reads Alpaca account equity, buying power, positions, and open nested orders. It stores account snapshots, reports untracked/missing positions and pool exposures, and identifies absent protective stops. Alpaca is the source of truth: it also reports ledger-vs-broker quantity discrepancies, pools over target, and unclassified-sector symbols as `warnings` without altering the ledger. With `STOP_MANAGEMENT_ENABLED=true`, it submits a protective stop for a bot-managed position missing an open stop order.
 
 The daily baseline uses Alpaca's same-day 1-minute portfolio history during market hours. If unavailable, it falls back to `account.last_equity` (previous close) or current equity. At a drawdown equal to or greater than `DAILY_DRAWDOWN_LIMIT_PCT`, the worker persists the halt for the current New York date and blocks new automated entries. It emits a critical log and, when configured, posts a JSON object containing severity, service, alert name, message, and timestamp to `ALERT_WEBHOOK_URL`. The state resets on the next New York calendar date after a new reconciliation.
 
@@ -94,7 +94,7 @@ The breaker does not terminate a pod, cancel bracket exits, or liquidate positio
 - `GET /healthz`: API process liveness.
 - `GET /readyz`: PostgreSQL connectivity.
 - `GET /backtests/{symbol}`: latest rolling metrics.
-- `GET /account/reconciliation`: latest account and allocation snapshot.
+- `GET /account/reconciliation`: latest account and allocation snapshot, including `ledger_discrepancies` and `warnings`. JSON GET responses are named `<endpoint>_<UTC timestamp>.json` via `Content-Disposition`.
 - `GET /risk`: current New York-date breaker state.
 
 Use `docker compose up --build` for the local stack. Kubernetes manifests live in `k8s/`; the Helm chart is in `helm/kube-trader/`. The API is internal by default. Configure credentials matching the selected Alpaca endpoint, webhook secrets, persistent storage, and private network access before enabling the stream or execution switches. Set `ALPACA_PAPER=false` only when live trading is intended; `EXECUTION_ENABLED` remains false by default.

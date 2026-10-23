@@ -18,7 +18,7 @@ from alpaca.trading.requests import (GetOrdersRequest, MarketOrderRequest, StopL
 from app.alpaca_reporting import (fetch_account_activities, serialize_account,
                                  serialize_order, serialize_position)
 from app.database import (broker_activity_sync_status, get_risk_state, init_db,
-                          managed_order_id, managed_order_stop_loss_pct,
+                          managed_fills, managed_order_id, managed_order_stop_loss_pct,
                           managed_order_roots, managed_orders, managed_pool_assignments,
                           managed_symbols, reserve_order, save_account_snapshot,
                           save_broker_activities, save_risk_state, sync_managed_orders,
@@ -26,6 +26,7 @@ from app.database import (broker_activity_sync_status, get_risk_state, init_db,
                           update_order)
 from app.settings import get_settings
 from app.streams import SIGNAL_STREAM, client, ensure_group, read_group
+from app.trade_accounting import build_realized_trade_report, reconcile_open_quantities
 from app.universe import sector_for_symbol
 
 logging.basicConfig(level=logging.INFO)
@@ -366,13 +367,38 @@ def reconcile(client_api: TradingClient):
     allocations = {
         pool: {"target_ratio": weight, "target_equity": equity * weight,
                "exposure": exposures[pool],
-               "remaining": max(0.0, equity * weight - exposures[pool])}
+               "remaining": max(0.0, equity * weight - exposures[pool]),
+               "over_target": max(0.0, exposures[pool] - equity * weight)}
         for pool, weight in weights.items()
     }
+    ledger_check = reconcile_open_quantities(
+        build_realized_trade_report(managed_fills())["open_managed_quantities"],
+        broker_positions,
+    )
+    warnings = []
+    for pool, item in allocations.items():
+        if item["over_target"] > 0:
+            warnings.append(
+                f"{pool} exposure exceeds its target by {item['over_target']:.2f}; "
+                "new entries for the pool are blocked until it falls below target")
+    unclassified = sorted(item["symbol"] for item in broker_positions
+                          if sector_for_symbol(item["symbol"], settings) == "unclassified")
+    if unclassified:
+        warnings.append("Positions without a sector mapping share one capped group; "
+                        "add them to SYMBOL_SECTORS: " + ", ".join(unclassified))
+    if ledger_check["discrepancies"]:
+        warnings.append(
+            f"{len(ledger_check['discrepancies'])} symbols differ between the order ledger and "
+            "Alpaca; Alpaca positions are treated as authoritative")
     diffs = {"untracked_broker_positions": sorted(broker_symbols - known),
              "managed_positions_missing_at_broker": sorted(known - broker_symbols),
              "positions_missing_protective_stop": stop_gaps,
+             "ledger_discrepancies": ledger_check["discrepancies"],
+             "unclassified_symbols": unclassified,
+             "warnings": warnings,
              "allocations": allocations, "sector_exposures": sector_exposures}
+    for warning in warnings:
+        log.warning("Reconciliation: %s", warning)
     save_account_snapshot(
         equity, buying_power, broker_positions, diffs,
         alpaca_account=serialize_account(account),
