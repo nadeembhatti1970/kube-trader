@@ -243,6 +243,18 @@ def managed_orders(limit: int = 3000) -> list[dict]:
         """, (limit,)).fetchall()
 
 
+def orders_missing_fill_data(limit: int = 50) -> list[str]:
+    """Broker ids of orders marked filled whose fill quantity or price was never stored."""
+    with connect() as db:
+        rows = db.execute("""
+          SELECT broker_order_id FROM orders
+          WHERE status = 'filled' AND broker_order_id IS NOT NULL
+            AND (filled_qty IS NULL OR filled_avg_price IS NULL)
+          ORDER BY created_at DESC LIMIT %s
+        """, (limit,)).fetchall()
+    return [row["broker_order_id"] for row in rows]
+
+
 def managed_fills() -> list[dict]:
     """Bot-recorded order fills plus Alpaca FILL activities for orders the bot never recorded.
 

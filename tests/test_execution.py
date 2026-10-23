@@ -1,10 +1,17 @@
 from types import SimpleNamespace
 import unittest
+from unittest import addModuleCleanup
 from unittest.mock import patch
 
 from alpaca.trading.enums import OrderSide
 
 from app.services import execution
+
+
+def setUpModule():
+    patcher = patch("app.services.execution.orders_missing_fill_data", return_value=[])
+    patcher.start()
+    addModuleCleanup(patcher.stop)
 
 
 class FakeTradingClient:
@@ -362,3 +369,35 @@ class RefreshTrackedOrderStatusesTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class BackfillFillDataTests(unittest.TestCase):
+    @patch("app.services.execution.update_latest_account_orders")
+    @patch("app.services.execution.sync_managed_orders")
+    @patch("app.services.execution.managed_order_roots")
+    @patch("app.services.execution.managed_orders", return_value=[])
+    @patch("app.services.execution.orders_missing_fill_data", return_value=["old-broker"])
+    def test_fetches_filled_orders_missing_fill_data_outside_window(
+            self, _missing, _orders, roots, sync_orders, _latest):
+        roots.return_value = [{"client_order_id": "old-client", "broker_order_id": "old-broker",
+                               "symbol": "AAPL", "pool": "intraday", "signal_id": "s"}]
+        old = SimpleNamespace(
+            id="old-broker", client_order_id="old-client", symbol="AAPL",
+            side=OrderSide.BUY, qty="3", status="filled", submitted_at=None,
+            filled_at=None, filled_qty="3", filled_avg_price="195", type="market", legs=[])
+
+        class Client:
+            fetched = []
+
+            def get_orders(self, _request):
+                return []
+
+            def get_order_by_id(self, order_id, filter=None):
+                self.fetched.append(order_id)
+                return old
+
+        client = Client()
+        execution.refresh_tracked_order_statuses(client)
+        self.assertEqual(client.fetched, ["old-broker"])
+        record = sync_orders.call_args.args[0][0]
+        self.assertEqual(float(record["filled_qty"]), 3.0)

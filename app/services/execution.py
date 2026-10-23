@@ -11,7 +11,7 @@ import httpx
 from alpaca.common.exceptions import APIError
 from alpaca.trading.client import TradingClient
 from alpaca.trading.enums import OrderClass, OrderSide, OrderType, QueryOrderStatus, TimeInForce
-from alpaca.trading.requests import (GetOrdersRequest, MarketOrderRequest, StopLossRequest,
+from alpaca.trading.requests import (GetOrderByIdRequest, GetOrdersRequest, MarketOrderRequest, StopLossRequest,
                                      GetPortfolioHistoryRequest, StopOrderRequest,
                                      TakeProfitRequest)
 
@@ -20,7 +20,8 @@ from app.alpaca_reporting import (fetch_account_activities, serialize_account,
 from app.database import (broker_activity_sync_status, get_risk_state, init_db,
                           managed_fills, managed_order_id, managed_order_stop_loss_pct,
                           managed_order_roots, managed_orders, managed_pool_assignments,
-                          managed_symbols, reserve_order, save_account_snapshot,
+                          managed_symbols, orders_missing_fill_data, reserve_order,
+                          save_account_snapshot,
                           save_broker_activities, save_risk_state, sync_managed_orders,
                           update_broker_activity_sync, update_latest_account_orders,
                           update_order)
@@ -122,6 +123,15 @@ def refresh_tracked_order_statuses(client_api: TradingClient, open_orders=None):
     orders_by_id = {str(order.id): order for order in broker_orders}
     for order in open_orders or []:
         orders_by_id.setdefault(str(order.id), order)
+    # Orders older than the 500-order window above would otherwise never get their fills stored.
+    for broker_order_id in orders_missing_fill_data():
+        if broker_order_id in orders_by_id:
+            continue
+        try:
+            orders_by_id[broker_order_id] = client_api.get_order_by_id(
+                broker_order_id, filter=GetOrderByIdRequest(nested=True))
+        except Exception:
+            log.exception("Unable to backfill fill data for order %s", broker_order_id)
 
     def sync_tree(order, metadata, parent_broker_order_id=None, is_root=False):
         broker_order_id = str(order.id)
