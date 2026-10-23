@@ -23,7 +23,7 @@ async def name_exported_reports(request: Request, call_next):
     response = await call_next(request)
     filename = export_filename(request.url.path) if request.method == "GET" else None
     if filename and response.status_code == 200:
-        response.headers["Content-Disposition"] = f'inline; filename="{filename}"'
+        response.headers["Content-Disposition"] = f'attachment; filename="{filename}"'
     return response
 
 

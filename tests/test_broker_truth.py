@@ -42,5 +42,17 @@ class ExportFilenameTests(unittest.TestCase):
         self.assertIsNone(export_filename("/", self.NOW))
 
 
+class SnapshotSerializationTests(unittest.TestCase):
+    def test_uuid_in_account_is_serialized(self):
+        import uuid
+        from unittest.mock import MagicMock, patch
+        from app import database
+        db = MagicMock()
+        with patch.object(database, "connect") as connect:
+            connect.return_value.__enter__.return_value = db
+            database.save_account_snapshot(1.0, 1.0, [], {}, alpaca_account={"id": uuid.uuid4()})
+        db.execute.assert_called_once()
+
+
 if __name__ == "__main__":
     unittest.main()

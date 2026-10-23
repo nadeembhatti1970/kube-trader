@@ -284,8 +284,10 @@ def save_account_snapshot(equity: float, buying_power: float, positions: list[di
             alpaca_account, open_orders, orders, trading_mode
           ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
         """, (datetime.now(timezone.utc), equity, buying_power,
-              json.dumps(positions), json.dumps(diffs), json.dumps(alpaca_account or {}),
-              json.dumps(open_orders or []), json.dumps(orders or []), trading_mode))
+              json.dumps(positions, default=str), json.dumps(diffs, default=str),
+              json.dumps(alpaca_account or {}, default=str),
+              json.dumps(open_orders or [], default=str), json.dumps(orders or [], default=str),
+              trading_mode))
 
 
 def update_latest_account_orders(orders: list[dict]):
@@ -294,7 +296,7 @@ def update_latest_account_orders(orders: list[dict]):
           UPDATE account_snapshots SET orders=%s
           WHERE captured_at=(SELECT captured_at FROM account_snapshots
                              ORDER BY captured_at DESC LIMIT 1)
-        """, (json.dumps(orders),))
+        """, (json.dumps(orders, default=str),))
 
 
 def save_broker_activities(activities: list[dict]):
