@@ -8,6 +8,7 @@ from datetime import datetime, timezone
 from zoneinfo import ZoneInfo
 
 import httpx
+from alpaca.common.exceptions import APIError
 from alpaca.trading.client import TradingClient
 from alpaca.trading.enums import OrderClass, OrderSide, OrderType, QueryOrderStatus, TimeInForce
 from alpaca.trading.requests import (GetOrdersRequest, MarketOrderRequest, StopLossRequest,
@@ -71,7 +72,13 @@ def close_managed_position(client_api: TradingClient, symbol: str, pool: str,
                     and side == closing_side.value
                     and status in {"new", "accepted", "pending_new", "partially_filled",
                                    "held", "accepted_for_bidding"}):
-                client_api.cancel_order_by_id(item.id)
+                try:
+                    client_api.cancel_order_by_id(item.id)
+                except APIError as exc:
+                    if "order pending cancel" not in str(exc).lower():
+                        raise
+                    log.info("Exit order %s for %s is already pending cancellation",
+                             item.id, symbol)
 
     deadline = time.monotonic() + 5
     while True:
