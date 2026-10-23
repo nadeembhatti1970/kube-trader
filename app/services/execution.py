@@ -39,11 +39,24 @@ def order_tree(order):
         yield from order_tree(leg)
 
 
-def close_managed_position(client_api: TradingClient, symbol: str, pool: str, positions):
+def open_closing_orders(client_api: TradingClient, symbol: str, closing_side: OrderSide):
+    orders = client_api.get_orders(GetOrdersRequest(
+        status=QueryOrderStatus.OPEN, limit=500, nested=True,
+    ))
+    return [
+        item for order in orders for item in order_tree(order)
+        if getattr(item, "symbol", None) == symbol
+        and str(getattr(getattr(item, "side", ""), "value",
+                        getattr(item, "side", ""))).lower() == closing_side.value
+    ]
+
+
+def close_managed_position(client_api: TradingClient, symbol: str, pool: str,
+                           positions) -> bool:
     """Cancel attached exit legs before closing so a protective order cannot oversell."""
     position = next((item for item in positions if item.symbol == symbol), None)
     if position is None:
-        return
+        return True
     closing_side = OrderSide.SELL if float(position.qty) > 0 else OrderSide.BUY
     entry_order_id = managed_order_id(symbol, pool)
     if entry_order_id:
@@ -56,9 +69,26 @@ def close_managed_position(client_api: TradingClient, symbol: str, pool: str, po
             if (getattr(item, "id", None) != entry_order.id
                     and getattr(item, "symbol", None) == symbol
                     and side == closing_side.value
-                    and status in {"new", "accepted", "pending_new", "partially_filled"}):
+                    and status in {"new", "accepted", "pending_new", "partially_filled",
+                                   "held", "accepted_for_bidding"}):
                 client_api.cancel_order_by_id(item.id)
+
+    deadline = time.monotonic() + 5
+    while True:
+        remaining = open_closing_orders(client_api, symbol, closing_side)
+        if not remaining:
+            break
+        if time.monotonic() >= deadline:
+            order_ids = [str(getattr(order, "id", "unknown")) for order in remaining]
+            log.warning(
+                "Deferring close for %s; closing-side orders still open: %s",
+                symbol, ", ".join(order_ids),
+            )
+            return False
+        time.sleep(0.25)
+
     client_api.close_position(symbol)
+    return True
 
 
 def notify_admin(message: str):
@@ -275,15 +305,15 @@ def place_entry(client_api: TradingClient, event: dict, signal_id: str,
         log.exception("Alpaca order submission failed for %s", symbol)
 
 
-def handle_signal(client_api: TradingClient, event: dict, signal_id: str, risk: dict):
+def handle_signal(client_api: TradingClient, event: dict, signal_id: str, risk: dict) -> bool:
     if not settings.execution_enabled:
         log.info("Execution disabled; signal observed: %s %s", event.get("symbol"), event.get("action"))
-        return
+        return True
     timestamp = datetime.fromisoformat(event["ts"].replace("Z", "+00:00"))
     age = (datetime.now(timezone.utc) - timestamp.astimezone(timezone.utc)).total_seconds()
     if age < -30 or age > settings.max_signal_age_seconds:
         log.warning("Ignoring stale/future signal for %s (age %.1fs)", event.get("symbol"), age)
-        return
+        return True
     account, positions, risk = reconcile(client_api)
     if event.get("action") == "sell":
         assigned_pool = managed_pool_assignments().get(event["symbol"])
@@ -291,13 +321,14 @@ def handle_signal(client_api: TradingClient, event: dict, signal_id: str, risk: 
         if assigned_pool != event_pool:
             log.info("Ignoring %s exit for %s position assigned to %s",
                      event_pool, event["symbol"], assigned_pool)
-            return
+            return True
         if event["symbol"] in managed_symbols() and any(
             position.symbol == event["symbol"] for position in positions
         ):
-            close_managed_position(client_api, event["symbol"], event_pool, positions)
-        return
+            return close_managed_position(client_api, event["symbol"], event_pool, positions)
+        return True
     place_entry(client_api, event, signal_id, account, positions, risk)
+    return True
 
 
 def main():
@@ -329,12 +360,14 @@ def main():
         for _, messages in batches:
             for message_id, fields in messages:
                 try:
-                    handle_signal(client_api, json.loads(fields["data"]), message_id, risk)
-                    redis_client.xack(SIGNAL_STREAM, "execution-workers", message_id)
+                    handled = handle_signal(
+                        client_api, json.loads(fields["data"]), message_id, risk,
+                    )
+                    if handled:
+                        redis_client.xack(SIGNAL_STREAM, "execution-workers", message_id)
                 except Exception:
                     log.exception("Unable to process execution signal %s", message_id)
 
 
 if __name__ == "__main__":
     main()
-
