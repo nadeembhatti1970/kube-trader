@@ -42,6 +42,13 @@ def order_tree(order):
         yield from order_tree(leg)
 
 
+def broker_order_type(order):
+    raw_type = getattr(order, "type", None) or getattr(order, "order_type", None)
+    if raw_type is None:
+        return None
+    return str(getattr(raw_type, "value", raw_type)).lower()
+
+
 def open_closing_orders(client_api: TradingClient, symbol: str, closing_side: OrderSide):
     orders = client_api.get_orders(GetOrdersRequest(
         status=QueryOrderStatus.OPEN, limit=500, nested=True,
@@ -79,10 +86,12 @@ def refresh_tracked_order_statuses(client_api: TradingClient, open_orders=None):
                            getattr(order, "side", ""))).lower()
         status = str(getattr(getattr(order, "status", ""), "value",
                              getattr(order, "status", ""))).lower()
-        signal_timestamp = metadata["signal_timestamp"] if is_root else None
-        reference_price = metadata["reference_price"] if is_root else None
+        signal_timestamp = metadata.get("signal_timestamp") if is_root else None
+        reference_price = metadata.get("reference_price") if is_root else None
+        reference_timestamp = metadata.get("reference_timestamp") if is_root else None
         filled_qty = getattr(order, "filled_qty", None)
         filled_avg_price = getattr(order, "filled_avg_price", None)
+        fees = getattr(order, "fees", None)
         order_records.append({
             "client_order_id": client_order_id,
             "broker_order_id": broker_order_id,
@@ -95,11 +104,14 @@ def refresh_tracked_order_statuses(client_api: TradingClient, open_orders=None):
             "status": status,
             "signal_timestamp": signal_timestamp,
             "reference_price": reference_price,
+            "reference_timestamp": reference_timestamp,
             "submitted_at": getattr(order, "submitted_at", None),
             "filled_at": getattr(order, "filled_at", None),
             "filled_qty": float(filled_qty) if filled_qty is not None else None,
             "filled_avg_price": (float(filled_avg_price)
                                  if filled_avg_price is not None else None),
+            "order_type": broker_order_type(order),
+            "fees": float(fees) if fees is not None else None,
         })
         previous = existing_by_broker_id.get(broker_order_id)
         previous_filled_qty = previous.get("filled_qty") if previous else None
@@ -107,12 +119,15 @@ def refresh_tracked_order_statuses(client_api: TradingClient, open_orders=None):
         fill_changed = previous is not None and (
             float(previous_filled_qty or 0) != float(filled_qty or 0)
             or float(previous_filled_price or 0) != float(filled_avg_price or 0)
+            or (fees is not None and previous.get("fees") != float(fees))
+            or (broker_order_type(order) is not None
+                and previous.get("order_type") != broker_order_type(order))
         )
         if previous is None or previous["status"] != status or fill_changed:
             fill_price = (float(filled_avg_price)
                           if filled_avg_price is not None else None)
             slippage_bps = None
-            if reference_price and fill_price is not None:
+            if reference_price is not None and reference_price > 0 and fill_price is not None:
                 slippage_bps = (
                     (fill_price - reference_price) / reference_price * 10_000
                     if side == OrderSide.BUY.value
@@ -123,13 +138,14 @@ def refresh_tracked_order_statuses(client_api: TradingClient, open_orders=None):
                 "client_order_id=%s broker_order_id=%s parent_broker_order_id=%s "
                 "symbol=%s pool=%s side=%s status=%s submitted_at=%s filled_at=%s "
                 "filled_qty=%s filled_avg_price=%s reference_price=%s "
-                "adverse_slippage_bps=%s",
+                "reference_timestamp=%s order_type=%s fees=%s adverse_slippage_bps=%s",
                 datetime.now(timezone.utc).isoformat(), metadata["signal_id"],
                 signal_timestamp, client_order_id, broker_order_id,
                 parent_broker_order_id, getattr(order, "symbol", None) or metadata["symbol"],
                 metadata["pool"], side, status, getattr(order, "submitted_at", None),
                 getattr(order, "filled_at", None), filled_qty, filled_avg_price,
-                reference_price, slippage_bps,
+                reference_price, reference_timestamp, broker_order_type(order),
+                fees, slippage_bps,
             )
         for leg in getattr(order, "legs", None) or []:
             sync_tree(leg, metadata, broker_order_id)
@@ -201,6 +217,7 @@ def close_managed_position(client_api: TradingClient, symbol: str, pool: str,
         "signal_timestamp": datetime.fromisoformat(event["ts"].replace("Z", "+00:00")),
         "reference_price": (float(event["price"])
                             if event.get("price") is not None else None),
+        "reference_timestamp": datetime.fromisoformat(event["ts"].replace("Z", "+00:00")),
         "submitted_at": getattr(close_order, "submitted_at", None),
         "filled_at": getattr(close_order, "filled_at", None),
         "filled_qty": (float(close_order.filled_qty)
@@ -208,6 +225,9 @@ def close_managed_position(client_api: TradingClient, symbol: str, pool: str,
         "filled_avg_price": (float(close_order.filled_avg_price)
                              if getattr(close_order, "filled_avg_price", None) is not None
                              else None),
+        "order_type": broker_order_type(close_order),
+        "fees": (float(close_order.fees)
+                 if getattr(close_order, "fees", None) is not None else None),
     }])
     return True
 
@@ -404,6 +424,9 @@ def place_entry(client_api: TradingClient, event: dict, signal_id: str,
                 filled_avg_price=(float(existing.filled_avg_price)
                                   if getattr(existing, "filled_avg_price", None) is not None
                                   else None),
+                order_type=broker_order_type(existing),
+                fees=(float(existing.fees)
+                      if getattr(existing, "fees", None) is not None else None),
             )
             log.info(
                 "Duplicate order suppressed timestamp=%s signal_timestamp=%s signal_id=%s "
@@ -461,6 +484,9 @@ def place_entry(client_api: TradingClient, event: dict, signal_id: str,
                     if getattr(order, "filled_qty", None) is not None else None),
         filled_avg_price=(float(order.filled_avg_price)
                           if getattr(order, "filled_avg_price", None) is not None else None),
+        order_type=broker_order_type(order),
+        fees=(float(order.fees)
+              if getattr(order, "fees", None) is not None else None),
     )
     mode = "paper" if settings.alpaca_paper else "LIVE"
     log.warning(

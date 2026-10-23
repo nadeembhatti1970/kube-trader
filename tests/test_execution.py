@@ -166,12 +166,15 @@ class RefreshTrackedOrderStatusesTests(unittest.TestCase):
             "status": "accepted",
             "signal_timestamp": None,
             "reference_price": 190.0,
+            "reference_timestamp": None,
         }
         self.existing = {
             **self.root,
             "side": "buy",
             "filled_qty": 3,
             "filled_avg_price": 190.25,
+            "order_type": "market",
+            "fees": None,
         }
         self.broker_order = SimpleNamespace(
             id="broker-1",
@@ -184,6 +187,7 @@ class RefreshTrackedOrderStatusesTests(unittest.TestCase):
             filled_at=None,
             filled_qty="3",
             filled_avg_price="190.25",
+            type="market",
             legs=[],
         )
 
@@ -209,6 +213,8 @@ class RefreshTrackedOrderStatusesTests(unittest.TestCase):
         record = sync_order.call_args.args[0][0]
         self.assertEqual(record["status"], "filled")
         self.assertEqual(record["filled_avg_price"], 190.25)
+        self.assertEqual(record["order_type"], "market")
+        self.assertIn("reference_timestamp", record)
         self.assertIn("signal_id=signal-1", captured.output[0])
         self.assertIn("broker_order_id=broker-1", captured.output[0])
         self.assertIn("status=filled", captured.output[0])
@@ -313,6 +319,7 @@ class RefreshTrackedOrderStatusesTests(unittest.TestCase):
             filled_at=None,
             filled_qty="3",
             filled_avg_price="195",
+            type="limit",
             legs=[],
         )
         root = SimpleNamespace(**{**vars(self.broker_order), "legs": [child]})
@@ -327,6 +334,7 @@ class RefreshTrackedOrderStatusesTests(unittest.TestCase):
             filled_at=None,
             filled_qty=None,
             filled_avg_price=None,
+            type="market",
             legs=[],
         )
 
@@ -343,6 +351,7 @@ class RefreshTrackedOrderStatusesTests(unittest.TestCase):
                             if record["broker_order_id"] == "child-order")
         self.assertEqual(child_record["parent_broker_order_id"], "broker-1")
         self.assertEqual(child_record["side"], "sell")
+        self.assertEqual(child_record["order_type"], "limit")
 
 
 if __name__ == "__main__":

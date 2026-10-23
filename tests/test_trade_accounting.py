@@ -74,6 +74,70 @@ class RealizedTradeReportTests(unittest.TestCase):
         }])
         self.assertEqual(report["summary_by_pool"]["intraday"]["gross_realized_pnl"], 38.0)
         self.assertEqual(report["summary_by_pool"]["intraday"]["win_rate_pct"], 100.0)
+        self.assertFalse(report["fees_complete"])
+        self.assertIsNone(report["summary_by_pool"]["intraday"]["net_realized_pnl"])
+        self.assertAlmostEqual(
+            report["summary_by_symbol"]["AAPL"]["average_holding_seconds"],
+            (300.0 + 290.0) / 2,
+        )
+
+    def test_reports_net_pnl_fees_order_types_and_grouped_metrics(self):
+        start = datetime(2026, 10, 23, 14, tzinfo=timezone.utc)
+        fills = [
+            {
+                "client_order_id": "entry",
+                "broker_order_id": "broker-entry",
+                "signal_id": "entry-signal",
+                "symbol": "AAPL",
+                "side": "buy",
+                "pool": "swing",
+                "filled_qty": 2,
+                "filled_avg_price": 100,
+                "reference_price": 99,
+                "reference_timestamp": start,
+                "signal_timestamp": start,
+                "submitted_at": start,
+                "filled_at": start + timedelta(seconds=1),
+                "order_type": "market",
+                "fees": 0.10,
+            },
+            {
+                "client_order_id": "exit",
+                "broker_order_id": "broker-exit",
+                "signal_id": "exit-signal",
+                "symbol": "AAPL",
+                "side": "sell",
+                "pool": "swing",
+                "filled_qty": 2,
+                "filled_avg_price": 110,
+                "reference_price": 111,
+                "reference_timestamp": start + timedelta(minutes=1),
+                "signal_timestamp": start + timedelta(minutes=1),
+                "submitted_at": start + timedelta(minutes=1),
+                "filled_at": start + timedelta(minutes=1, seconds=2),
+                "order_type": "stop",
+                "fees": 0.20,
+            },
+        ]
+
+        report = build_realized_trade_report(fills)
+        trade = report["trades"][0]
+
+        self.assertEqual(trade["entry_order_type"], "market")
+        self.assertEqual(trade["exit_order_type"], "stop")
+        self.assertEqual(trade["entry_reference_timestamp"], start)
+        self.assertAlmostEqual(trade["entry_signal_to_fill_seconds"], 1)
+        self.assertAlmostEqual(trade["fees"], 0.30)
+        self.assertAlmostEqual(trade["net_realized_pnl"], 19.70)
+        self.assertTrue(report["fees_complete"])
+        self.assertAlmostEqual(
+            report["summary_by_strategy"]["swing"]["net_realized_pnl"], 19.70,
+        )
+        self.assertAlmostEqual(
+            report["summary_by_strategy_symbol_order_type"]
+            ["swing|AAPL|market|stop"]["gross_realized_pnl"],
+            20,
+        )
 
     def test_reports_sell_fills_without_a_managed_entry_as_unmatched(self):
         report = build_realized_trade_report([{

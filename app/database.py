@@ -45,7 +45,8 @@ def init_db():
               created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
               parent_broker_order_id TEXT, signal_timestamp TIMESTAMPTZ,
               reference_price DOUBLE PRECISION, submitted_at TIMESTAMPTZ, filled_at TIMESTAMPTZ,
-              filled_qty DOUBLE PRECISION, filled_avg_price DOUBLE PRECISION
+              filled_qty DOUBLE PRECISION, filled_avg_price DOUBLE PRECISION,
+              reference_timestamp TIMESTAMPTZ, order_type TEXT, fees DOUBLE PRECISION
             );
             ALTER TABLE orders ADD COLUMN IF NOT EXISTS stop_loss_pct DOUBLE PRECISION;
             ALTER TABLE orders ADD COLUMN IF NOT EXISTS parent_broker_order_id TEXT;
@@ -55,6 +56,9 @@ def init_db():
             ALTER TABLE orders ADD COLUMN IF NOT EXISTS filled_at TIMESTAMPTZ;
             ALTER TABLE orders ADD COLUMN IF NOT EXISTS filled_qty DOUBLE PRECISION;
             ALTER TABLE orders ADD COLUMN IF NOT EXISTS filled_avg_price DOUBLE PRECISION;
+            ALTER TABLE orders ADD COLUMN IF NOT EXISTS reference_timestamp TIMESTAMPTZ;
+            ALTER TABLE orders ADD COLUMN IF NOT EXISTS order_type TEXT;
+            ALTER TABLE orders ADD COLUMN IF NOT EXISTS fees DOUBLE PRECISION;
             CREATE TABLE IF NOT EXISTS account_snapshots (
               captured_at TIMESTAMPTZ PRIMARY KEY, equity DOUBLE PRECISION NOT NULL,
               buying_power DOUBLE PRECISION NOT NULL, positions JSONB NOT NULL,
@@ -138,27 +142,30 @@ def reserve_order(client_order_id: str, signal_id: str, symbol: str, qty: float,
     with connect() as db:
         result = db.execute("""
           INSERT INTO orders(client_order_id, signal_id, symbol, side, qty, pool, status,
-                             stop_loss_pct, signal_timestamp, reference_price)
-          VALUES (%s, %s, %s, 'buy', %s, %s, 'pending', %s, %s, %s)
+                             stop_loss_pct, signal_timestamp, reference_price,
+                             reference_timestamp, order_type)
+          VALUES (%s, %s, %s, 'buy', %s, %s, 'pending', %s, %s, %s, %s, 'market')
           ON CONFLICT(client_order_id) DO NOTHING
         """, (client_order_id, signal_id, symbol, qty, pool, stop_loss_pct,
-              signal_timestamp, reference_price))
+              signal_timestamp, reference_price, signal_timestamp))
         return result.rowcount == 1
 
 
 def update_order(client_order_id: str, broker_id: str | None, status: str,
                  submitted_at: datetime | None = None, filled_at: datetime | None = None,
                  filled_qty: float | None = None,
-                 filled_avg_price: float | None = None):
+                 filled_avg_price: float | None = None,
+                 order_type: str | None = None, fees: float | None = None):
     with connect() as db:
         db.execute("""
           UPDATE orders SET broker_order_id=COALESCE(%s, broker_order_id), status=%s,
             submitted_at=COALESCE(%s, submitted_at), filled_at=COALESCE(%s, filled_at),
             filled_qty=COALESCE(%s, filled_qty),
-            filled_avg_price=COALESCE(%s, filled_avg_price)
+            filled_avg_price=COALESCE(%s, filled_avg_price),
+            order_type=COALESCE(%s, order_type), fees=COALESCE(%s, fees)
           WHERE client_order_id=%s
         """, (broker_id, status, submitted_at, filled_at, filled_qty, filled_avg_price,
-              client_order_id))
+              order_type, fees, client_order_id))
 
 
 def sync_managed_orders(orders: list[dict]):
@@ -168,11 +175,13 @@ def sync_managed_orders(orders: list[dict]):
         db.cursor().executemany("""
           INSERT INTO orders(client_order_id, signal_id, symbol, side, qty, pool, broker_order_id,
                              status, parent_broker_order_id, signal_timestamp, reference_price,
-                             submitted_at, filled_at, filled_qty, filled_avg_price)
+                             submitted_at, filled_at, filled_qty, filled_avg_price,
+                             reference_timestamp, order_type, fees)
           VALUES (%(client_order_id)s, %(signal_id)s, %(symbol)s, %(side)s, %(qty)s, %(pool)s,
                   %(broker_order_id)s, %(status)s, %(parent_broker_order_id)s,
                   %(signal_timestamp)s, %(reference_price)s, %(submitted_at)s,
-                  %(filled_at)s, %(filled_qty)s, %(filled_avg_price)s)
+                  %(filled_at)s, %(filled_qty)s, %(filled_avg_price)s,
+                  %(reference_timestamp)s, %(order_type)s, %(fees)s)
           ON CONFLICT(client_order_id) DO UPDATE SET
             broker_order_id=excluded.broker_order_id, status=excluded.status,
             parent_broker_order_id=COALESCE(excluded.parent_broker_order_id,
@@ -182,7 +191,11 @@ def sync_managed_orders(orders: list[dict]):
             submitted_at=COALESCE(excluded.submitted_at, orders.submitted_at),
             filled_at=COALESCE(excluded.filled_at, orders.filled_at),
             filled_qty=COALESCE(excluded.filled_qty, orders.filled_qty),
-            filled_avg_price=COALESCE(excluded.filled_avg_price, orders.filled_avg_price)
+            filled_avg_price=COALESCE(excluded.filled_avg_price, orders.filled_avg_price),
+            reference_timestamp=COALESCE(excluded.reference_timestamp,
+                                         orders.reference_timestamp),
+            order_type=COALESCE(excluded.order_type, orders.order_type),
+            fees=COALESCE(excluded.fees, orders.fees)
         """, orders)
 
 
@@ -190,7 +203,7 @@ def managed_order_roots(limit: int = 5000) -> list[dict]:
     with connect() as db:
         return db.execute("""
           SELECT client_order_id, broker_order_id, signal_id, symbol, pool, status,
-                 signal_timestamp, reference_price
+                 signal_timestamp, reference_price, reference_timestamp
           FROM orders
           WHERE parent_broker_order_id IS NULL
           ORDER BY created_at DESC LIMIT %s
@@ -201,7 +214,7 @@ def managed_orders(limit: int = 3000) -> list[dict]:
     with connect() as db:
         return db.execute("""
           SELECT client_order_id, broker_order_id, signal_id, symbol, side, pool, status,
-                 filled_qty, filled_avg_price
+                 filled_qty, filled_avg_price, order_type, fees
           FROM orders ORDER BY created_at DESC LIMIT %s
         """, (limit,)).fetchall()
 
@@ -211,7 +224,7 @@ def managed_fills() -> list[dict]:
         return db.execute("""
           SELECT client_order_id, broker_order_id, signal_id, symbol, side, pool, qty,
                  signal_timestamp, reference_price, submitted_at, filled_at,
-                 filled_qty, filled_avg_price
+                 filled_qty, filled_avg_price, reference_timestamp, order_type, fees
           FROM orders
           WHERE filled_qty > 0 AND filled_avg_price IS NOT NULL
             AND side IN ('buy', 'sell')
