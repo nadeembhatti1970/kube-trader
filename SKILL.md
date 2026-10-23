@@ -94,7 +94,7 @@ The breaker does not terminate a pod, cancel bracket exits, or liquidate positio
 - `GET /healthz`: API process liveness.
 - `GET /readyz`: PostgreSQL connectivity.
 - `GET /backtests/{symbol}`: latest rolling metrics.
-- `GET /account/reconciliation`: latest account and allocation snapshot, including `ledger_discrepancies` and `warnings`. JSON GET responses are named `<endpoint>_<UTC timestamp>.json` via `Content-Disposition`.
+- `GET /account/reconciliation`: latest account and allocation snapshot, including `ledger_discrepancies` and `warnings`. JSON GET responses are named `<endpoint>_<UTC timestamp>.json` via `Content-Disposition` (`attachment` only with `?download=true`; otherwise `inline`).
 - `GET /risk`: current New York-date breaker state.
 
 Use `docker compose up --build` for the local stack. Kubernetes manifests live in `k8s/`; the Helm chart is in `helm/kube-trader/`. The API is internal by default. Configure credentials matching the selected Alpaca endpoint, webhook secrets, persistent storage, and private network access before enabling the stream or execution switches. Set `ALPACA_PAPER=false` only when live trading is intended; `EXECUTION_ENABLED` remains false by default.

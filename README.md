@@ -179,4 +179,4 @@ The chart defaults to paper mode and all stream/execution switches to off. To en
 | `ALERT_WEBHOOK_URL` | empty | Optional generic JSON circuit-breaker webhook receiver |
 | `POSTGRES_DSN` / `REDIS_URL` | local defaults | Database and stream-broker connection strings |
 
-**Export filenames:** successful JSON `GET` responses carry `Content-Disposition` with a name derived from the endpoint plus a UTC timestamp, e.g. `reconciliation_20261023T211242Z.json`, `broker_...`, `trades_...` (the leading `account` segment is dropped; health and docs endpoints are excluded).
+**Export filenames:** successful JSON `GET` responses carry `Content-Disposition` (`inline`, so Swagger UI still renders the body; add `?download=true` to get `attachment` and a saved file, e.g. opening `/trades?download=true` in a browser tab or `curl -OJ`) with a name derived from the endpoint plus a UTC timestamp, e.g. `reconciliation_20261023T211242Z.json`, `broker_...`, `trades_...` (the leading `account` segment is dropped; health and docs endpoints are excluded).
