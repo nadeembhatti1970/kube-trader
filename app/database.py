@@ -246,32 +246,39 @@ def managed_orders(limit: int = 3000) -> list[dict]:
 def managed_fills() -> list[dict]:
     """Bot-recorded order fills plus Alpaca FILL activities for orders the bot never recorded.
 
-    Broker-only fills (e.g. bracket exit legs or orders placed outside the bot) are aggregated
-    per Alpaca order and take the pool the bot used for that symbol, else "unattributed".
+    Orders with no recorded fill data (bracket exit legs, orders placed outside the bot, or bot
+    orders whose fills were never stored) use Alpaca fills aggregated per order. They keep the
+    bot's pool, signal and order type when recorded, else the pool of the symbol's latest earlier order or "unattributed".
     """
     with connect() as db:
         return db.execute("""
-          WITH symbol_pool AS (
-            SELECT DISTINCT ON (symbol) symbol, pool
-            FROM orders WHERE pool IS NOT NULL
-            ORDER BY symbol, created_at DESC
-          ), broker_only AS (
-            SELECT 'broker-' || a.order_id AS client_order_id, a.order_id AS broker_order_id,
-                   NULL::text AS signal_id, a.symbol,
+          WITH activity_fills AS (
+            SELECT a.order_id, a.symbol,
                    CASE WHEN a.side LIKE 'buy%%' THEN 'buy' ELSE 'sell' END AS side,
-                   COALESCE(sp.pool, 'unattributed') AS pool, SUM(a.qty) AS qty,
-                   NULL::timestamptz AS signal_timestamp, NULL::double precision AS reference_price,
-                   NULL::timestamptz AS submitted_at, MAX(a.activity_at) AS filled_at,
-                   SUM(a.qty) AS filled_qty, SUM(a.qty * a.price) / SUM(a.qty) AS filled_avg_price,
-                   NULL::timestamptz AS reference_timestamp, NULL::text AS order_type,
-                   NULL::double precision AS fees
+                   SUM(a.qty) AS qty, MAX(a.activity_at) AS filled_at,
+                   SUM(a.qty * a.price) / SUM(a.qty) AS avg_price
             FROM broker_activities a
-            LEFT JOIN symbol_pool sp ON sp.symbol = a.symbol
             WHERE a.activity_type = 'FILL' AND a.order_id IS NOT NULL AND a.qty > 0
               AND a.price IS NOT NULL AND a.symbol IS NOT NULL
               AND a.side IN ('buy', 'sell', 'sell_short', 'buy_to_cover')
-              AND NOT EXISTS (SELECT 1 FROM orders o WHERE o.broker_order_id = a.order_id)
-            GROUP BY a.order_id, a.symbol, a.side, sp.pool
+            GROUP BY a.order_id, a.symbol, 3
+          ), broker_only AS (
+            SELECT COALESCE(o.client_order_id, 'broker-' || f.order_id) AS client_order_id,
+                   f.order_id AS broker_order_id, o.signal_id, f.symbol, f.side,
+                   COALESCE(o.pool, sp.pool, 'unattributed') AS pool, f.qty,
+                   o.signal_timestamp, o.reference_price, o.submitted_at, f.filled_at,
+                   f.qty AS filled_qty, f.avg_price AS filled_avg_price,
+                   o.reference_timestamp, o.order_type, o.fees
+            FROM activity_fills f
+            LEFT JOIN orders o ON o.broker_order_id = f.order_id
+            LEFT JOIN LATERAL (
+              SELECT p.pool FROM orders p
+              WHERE p.symbol = f.symbol AND p.pool IS NOT NULL
+                AND p.created_at <= f.filled_at
+              ORDER BY p.created_at DESC LIMIT 1
+            ) sp ON TRUE
+            WHERE o.broker_order_id IS NULL
+               OR NOT (COALESCE(o.filled_qty, 0) > 0 AND o.filled_avg_price IS NOT NULL)
           ), recorded AS (
             SELECT client_order_id, broker_order_id, signal_id, symbol, side, pool, qty,
                    signal_timestamp, reference_price, submitted_at, filled_at,
