@@ -16,8 +16,9 @@ from alpaca.trading.requests import (GetOrdersRequest, MarketOrderRequest, StopL
                                      TakeProfitRequest)
 
 from app.database import (get_risk_state, init_db, managed_order_id, managed_order_stop_loss_pct,
+                          managed_order_roots, managed_orders,
                           managed_pool_assignments, managed_symbols, reserve_order,
-                          save_account_snapshot, save_risk_state, tracked_open_orders,
+                          save_account_snapshot, save_risk_state, sync_managed_orders,
                           update_order)
 from app.settings import get_settings
 from app.streams import SIGNAL_STREAM, client, ensure_group, read_group
@@ -53,38 +54,98 @@ def open_closing_orders(client_api: TradingClient, symbol: str, closing_side: Or
     ]
 
 
-def refresh_tracked_order_statuses(client_api: TradingClient):
-    for tracked in tracked_open_orders():
-        try:
-            order = (client_api.get_order_by_id(tracked["broker_order_id"])
-                     if tracked["broker_order_id"]
-                     else client_api.get_order_by_client_id(tracked["client_order_id"]))
-            status = str(getattr(order.status, "value", order.status)).lower()
-            if status == tracked["status"]:
-                continue
-            broker_order_id = str(order.id)
-            update_order(tracked["client_order_id"], broker_order_id, status)
+def refresh_tracked_order_statuses(client_api: TradingClient, open_orders=None):
+    roots = managed_order_roots()
+    roots_by_client_id = {row["client_order_id"]: row for row in roots}
+    roots_by_broker_id = {
+        row["broker_order_id"]: row for row in roots if row["broker_order_id"]
+    }
+    existing_by_broker_id = {
+        row["broker_order_id"]: row for row in managed_orders()
+        if row["broker_order_id"]
+    }
+    broker_orders = client_api.get_orders(GetOrdersRequest(
+        status=QueryOrderStatus.ALL, limit=500, nested=True,
+    ))
+    orders_by_id = {str(order.id): order for order in broker_orders}
+    for order in open_orders or []:
+        orders_by_id.setdefault(str(order.id), order)
+
+    def sync_tree(order, metadata, parent_broker_order_id=None, is_root=False):
+        broker_order_id = str(order.id)
+        client_order_id = str(getattr(order, "client_order_id", "") or
+                              f"alpaca-{broker_order_id}")
+        side = str(getattr(getattr(order, "side", ""), "value",
+                           getattr(order, "side", ""))).lower()
+        status = str(getattr(getattr(order, "status", ""), "value",
+                             getattr(order, "status", ""))).lower()
+        signal_timestamp = metadata["signal_timestamp"] if is_root else None
+        reference_price = metadata["reference_price"] if is_root else None
+        filled_qty = getattr(order, "filled_qty", None)
+        filled_avg_price = getattr(order, "filled_avg_price", None)
+        order_records.append({
+            "client_order_id": client_order_id,
+            "broker_order_id": broker_order_id,
+            "parent_broker_order_id": parent_broker_order_id,
+            "signal_id": metadata["signal_id"],
+            "symbol": str(getattr(order, "symbol", None) or metadata["symbol"]),
+            "side": side,
+            "qty": float(getattr(order, "qty", None) or 0),
+            "pool": metadata["pool"],
+            "status": status,
+            "signal_timestamp": signal_timestamp,
+            "reference_price": reference_price,
+            "submitted_at": getattr(order, "submitted_at", None),
+            "filled_at": getattr(order, "filled_at", None),
+            "filled_qty": float(filled_qty) if filled_qty is not None else None,
+            "filled_avg_price": (float(filled_avg_price)
+                                 if filled_avg_price is not None else None),
+        })
+        previous = existing_by_broker_id.get(broker_order_id)
+        previous_filled_qty = previous.get("filled_qty") if previous else None
+        previous_filled_price = previous.get("filled_avg_price") if previous else None
+        fill_changed = previous is not None and (
+            float(previous_filled_qty or 0) != float(filled_qty or 0)
+            or float(previous_filled_price or 0) != float(filled_avg_price or 0)
+        )
+        if previous is None or previous["status"] != status or fill_changed:
+            fill_price = (float(filled_avg_price)
+                          if filled_avg_price is not None else None)
+            slippage_bps = None
+            if reference_price and fill_price is not None:
+                slippage_bps = (
+                    (fill_price - reference_price) / reference_price * 10_000
+                    if side == OrderSide.BUY.value
+                    else (reference_price - fill_price) / reference_price * 10_000
+                )
             log.info(
-                "Order status timestamp=%s signal_id=%s client_order_id=%s "
-                "broker_order_id=%s symbol=%s pool=%s status=%s filled_qty=%s "
-                "filled_avg_price=%s",
-                datetime.now(timezone.utc).isoformat(), tracked["signal_id"],
-                tracked["client_order_id"], broker_order_id, tracked["symbol"],
-                tracked["pool"], status, getattr(order, "filled_qty", None),
-                getattr(order, "filled_avg_price", None),
+                "Order status observed_at=%s signal_id=%s signal_timestamp=%s "
+                "client_order_id=%s broker_order_id=%s parent_broker_order_id=%s "
+                "symbol=%s pool=%s side=%s status=%s submitted_at=%s filled_at=%s "
+                "filled_qty=%s filled_avg_price=%s reference_price=%s "
+                "adverse_slippage_bps=%s",
+                datetime.now(timezone.utc).isoformat(), metadata["signal_id"],
+                signal_timestamp, client_order_id, broker_order_id,
+                parent_broker_order_id, getattr(order, "symbol", None) or metadata["symbol"],
+                metadata["pool"], side, status, getattr(order, "submitted_at", None),
+                getattr(order, "filled_at", None), filled_qty, filled_avg_price,
+                reference_price, slippage_bps,
             )
-        except Exception:
-            log.exception(
-                "Unable to refresh order status timestamp=%s signal_id=%s "
-                "client_order_id=%s broker_order_id=%s symbol=%s",
-                datetime.now(timezone.utc).isoformat(), tracked["signal_id"],
-                tracked["client_order_id"], tracked["broker_order_id"],
-                tracked["symbol"],
-            )
+        for leg in getattr(order, "legs", None) or []:
+            sync_tree(leg, metadata, broker_order_id)
+
+    order_records = []
+    for order in orders_by_id.values():
+        client_order_id = str(getattr(order, "client_order_id", "") or "")
+        metadata = (roots_by_client_id.get(client_order_id)
+                    or roots_by_broker_id.get(str(order.id)))
+        if metadata is not None:
+            sync_tree(order, metadata, is_root=True)
+    sync_managed_orders(order_records)
 
 
 def close_managed_position(client_api: TradingClient, symbol: str, pool: str,
-                           positions) -> bool:
+                           positions, signal_id: str, event: dict) -> bool:
     """Cancel attached exit legs before closing so a protective order cannot oversell."""
     position = next((item for item in positions if item.symbol == symbol), None)
     if position is None:
@@ -125,7 +186,29 @@ def close_managed_position(client_api: TradingClient, symbol: str, pool: str,
             return False
         time.sleep(0.25)
 
-    client_api.close_position(symbol)
+    close_order = client_api.close_position(symbol)
+    status = str(getattr(close_order.status, "value", close_order.status)).lower()
+    sync_managed_orders([{
+        "client_order_id": str(close_order.client_order_id),
+        "broker_order_id": str(close_order.id),
+        "parent_broker_order_id": None,
+        "signal_id": signal_id,
+        "symbol": symbol,
+        "side": closing_side.value,
+        "qty": float(getattr(close_order, "qty", None) or abs(float(position.qty))),
+        "pool": pool,
+        "status": status,
+        "signal_timestamp": datetime.fromisoformat(event["ts"].replace("Z", "+00:00")),
+        "reference_price": (float(event["price"])
+                            if event.get("price") is not None else None),
+        "submitted_at": getattr(close_order, "submitted_at", None),
+        "filled_at": getattr(close_order, "filled_at", None),
+        "filled_qty": (float(close_order.filled_qty)
+                       if getattr(close_order, "filled_qty", None) is not None else None),
+        "filled_avg_price": (float(close_order.filled_avg_price)
+                             if getattr(close_order, "filled_avg_price", None) is not None
+                             else None),
+    }])
     return True
 
 
@@ -248,9 +331,11 @@ def reconcile(client_api: TradingClient):
         log.critical("CIRCUIT BREAKER: %s; new automated entries halted", reason)
         notify_admin(reason)
         state = get_risk_state(today)
-    return account, positions, {"halted": bool(state["halted"]), "drawdown": drawdown,
-                                "equity": equity, "buying_power": buying_power,
-                                "reconciliation": diffs}
+    return (account, positions,
+            {"halted": bool(state["halted"]), "drawdown": drawdown,
+             "equity": equity, "buying_power": buying_power,
+             "reconciliation": diffs},
+            open_orders)
 
 
 def place_entry(client_api: TradingClient, event: dict, signal_id: str,
@@ -304,11 +389,22 @@ def place_entry(client_api: TradingClient, event: dict, signal_id: str,
         return
 
     client_order_id = "kt-" + hashlib.sha256(f"{symbol}:{pool}:{signal_id}".encode()).hexdigest()[:28]
-    if not reserve_order(client_order_id, signal_id, symbol, qty, pool, stop_loss_pct):
+    signal_timestamp = datetime.fromisoformat(event["ts"].replace("Z", "+00:00"))
+    if not reserve_order(client_order_id, signal_id, symbol, qty, pool, stop_loss_pct,
+                         signal_timestamp, price):
         try:
             existing = client_api.get_order_by_client_id(client_order_id)
             status = str(getattr(existing.status, "value", existing.status)).lower()
-            update_order(client_order_id, str(existing.id), status)
+            update_order(
+                client_order_id, str(existing.id), status,
+                submitted_at=getattr(existing, "submitted_at", None),
+                filled_at=getattr(existing, "filled_at", None),
+                filled_qty=(float(existing.filled_qty)
+                            if getattr(existing, "filled_qty", None) is not None else None),
+                filled_avg_price=(float(existing.filled_avg_price)
+                                  if getattr(existing, "filled_avg_price", None) is not None
+                                  else None),
+            )
             log.info(
                 "Duplicate order suppressed timestamp=%s signal_timestamp=%s signal_id=%s "
                 "client_order_id=%s broker_order_id=%s symbol=%s pool=%s status=%s",
@@ -357,7 +453,15 @@ def place_entry(client_api: TradingClient, event: dict, signal_id: str,
         return
     status = str(getattr(order.status, "value", order.status)).lower()
     broker_order_id = str(order.id)
-    update_order(client_order_id, broker_order_id, status)
+    update_order(
+        client_order_id, broker_order_id, status,
+        submitted_at=getattr(order, "submitted_at", None),
+        filled_at=getattr(order, "filled_at", None),
+        filled_qty=(float(order.filled_qty)
+                    if getattr(order, "filled_qty", None) is not None else None),
+        filled_avg_price=(float(order.filled_avg_price)
+                          if getattr(order, "filled_avg_price", None) is not None else None),
+    )
     mode = "paper" if settings.alpaca_paper else "LIVE"
     log.warning(
         "Order submitted timestamp=%s signal_timestamp=%s signal_id=%s "
@@ -377,18 +481,24 @@ def handle_signal(client_api: TradingClient, event: dict, signal_id: str, risk: 
     if age < -30 or age > settings.max_signal_age_seconds:
         log.warning("Ignoring stale/future signal for %s (age %.1fs)", event.get("symbol"), age)
         return True
-    account, positions, risk = reconcile(client_api)
+    account, positions, risk, _ = reconcile(client_api)
     if event.get("action") == "sell":
         assigned_pool = managed_pool_assignments().get(event["symbol"])
         event_pool = event.get("pool", "intraday")
         if assigned_pool != event_pool:
-            log.info("Ignoring %s exit for %s position assigned to %s",
-                     event_pool, event["symbol"], assigned_pool)
+            log.warning(
+                "Ignoring unmanaged exit signal timestamp=%s signal_timestamp=%s "
+                "signal_id=%s symbol=%s requested_pool=%s assigned_pool=%s",
+                datetime.now(timezone.utc).isoformat(), event.get("ts"), signal_id,
+                event["symbol"], event_pool, assigned_pool,
+            )
             return True
         if event["symbol"] in managed_symbols() and any(
             position.symbol == event["symbol"] for position in positions
         ):
-            return close_managed_position(client_api, event["symbol"], event_pool, positions)
+            return close_managed_position(
+                client_api, event["symbol"], event_pool, positions, signal_id, event,
+            )
         return True
     place_entry(client_api, event, signal_id, account, positions, risk)
     return True
@@ -413,8 +523,8 @@ def main():
     while True:
         if time.monotonic() - last_reconcile >= settings.reconcile_interval_seconds:
             try:
-                _, _, risk = reconcile(client_api)
-                refresh_tracked_order_statuses(client_api)
+                _, _, risk, open_orders = reconcile(client_api)
+                refresh_tracked_order_statuses(client_api, open_orders)
             except Exception:
                 log.exception("Broker reconciliation failed; no entries will be processed")
                 risk = {"halted": True, "equity": 0.0, "buying_power": 0.0}

@@ -42,9 +42,19 @@ def init_db():
               client_order_id TEXT PRIMARY KEY, signal_id TEXT NOT NULL, symbol TEXT NOT NULL,
               side TEXT NOT NULL, qty DOUBLE PRECISION NOT NULL, pool TEXT NOT NULL,
               broker_order_id TEXT, status TEXT NOT NULL, stop_loss_pct DOUBLE PRECISION,
-              created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+              created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+              parent_broker_order_id TEXT, signal_timestamp TIMESTAMPTZ,
+              reference_price DOUBLE PRECISION, submitted_at TIMESTAMPTZ, filled_at TIMESTAMPTZ,
+              filled_qty DOUBLE PRECISION, filled_avg_price DOUBLE PRECISION
             );
             ALTER TABLE orders ADD COLUMN IF NOT EXISTS stop_loss_pct DOUBLE PRECISION;
+            ALTER TABLE orders ADD COLUMN IF NOT EXISTS parent_broker_order_id TEXT;
+            ALTER TABLE orders ADD COLUMN IF NOT EXISTS signal_timestamp TIMESTAMPTZ;
+            ALTER TABLE orders ADD COLUMN IF NOT EXISTS reference_price DOUBLE PRECISION;
+            ALTER TABLE orders ADD COLUMN IF NOT EXISTS submitted_at TIMESTAMPTZ;
+            ALTER TABLE orders ADD COLUMN IF NOT EXISTS filled_at TIMESTAMPTZ;
+            ALTER TABLE orders ADD COLUMN IF NOT EXISTS filled_qty DOUBLE PRECISION;
+            ALTER TABLE orders ADD COLUMN IF NOT EXISTS filled_avg_price DOUBLE PRECISION;
             CREATE TABLE IF NOT EXISTS account_snapshots (
               captured_at TIMESTAMPTZ PRIMARY KEY, equity DOUBLE PRECISION NOT NULL,
               buying_power DOUBLE PRECISION NOT NULL, positions JSONB NOT NULL,
@@ -123,35 +133,90 @@ def save_backtest(symbol: str, metrics: dict):
 
 
 def reserve_order(client_order_id: str, signal_id: str, symbol: str, qty: float,
-                  pool: str, stop_loss_pct: float) -> bool:
+                  pool: str, stop_loss_pct: float, signal_timestamp: datetime,
+                  reference_price: float) -> bool:
     with connect() as db:
         result = db.execute("""
           INSERT INTO orders(client_order_id, signal_id, symbol, side, qty, pool, status,
-                             stop_loss_pct)
-          VALUES (%s, %s, %s, 'buy', %s, %s, 'pending', %s)
+                             stop_loss_pct, signal_timestamp, reference_price)
+          VALUES (%s, %s, %s, 'buy', %s, %s, 'pending', %s, %s, %s)
           ON CONFLICT(client_order_id) DO NOTHING
-        """, (client_order_id, signal_id, symbol, qty, pool, stop_loss_pct))
+        """, (client_order_id, signal_id, symbol, qty, pool, stop_loss_pct,
+              signal_timestamp, reference_price))
         return result.rowcount == 1
 
 
-def update_order(client_order_id: str, broker_id: str | None, status: str):
+def update_order(client_order_id: str, broker_id: str | None, status: str,
+                 submitted_at: datetime | None = None, filled_at: datetime | None = None,
+                 filled_qty: float | None = None,
+                 filled_avg_price: float | None = None):
     with connect() as db:
         db.execute("""
-          UPDATE orders SET broker_order_id=COALESCE(%s, broker_order_id), status=%s
+          UPDATE orders SET broker_order_id=COALESCE(%s, broker_order_id), status=%s,
+            submitted_at=COALESCE(%s, submitted_at), filled_at=COALESCE(%s, filled_at),
+            filled_qty=COALESCE(%s, filled_qty),
+            filled_avg_price=COALESCE(%s, filled_avg_price)
           WHERE client_order_id=%s
-        """, (broker_id, status, client_order_id))
+        """, (broker_id, status, submitted_at, filled_at, filled_qty, filled_avg_price,
+              client_order_id))
 
 
-def tracked_open_orders(limit: int = 100) -> list[dict]:
+def sync_managed_orders(orders: list[dict]):
+    if not orders:
+        return
+    with connect() as db:
+        db.cursor().executemany("""
+          INSERT INTO orders(client_order_id, signal_id, symbol, side, qty, pool, broker_order_id,
+                             status, parent_broker_order_id, signal_timestamp, reference_price,
+                             submitted_at, filled_at, filled_qty, filled_avg_price)
+          VALUES (%(client_order_id)s, %(signal_id)s, %(symbol)s, %(side)s, %(qty)s, %(pool)s,
+                  %(broker_order_id)s, %(status)s, %(parent_broker_order_id)s,
+                  %(signal_timestamp)s, %(reference_price)s, %(submitted_at)s,
+                  %(filled_at)s, %(filled_qty)s, %(filled_avg_price)s)
+          ON CONFLICT(client_order_id) DO UPDATE SET
+            broker_order_id=excluded.broker_order_id, status=excluded.status,
+            parent_broker_order_id=COALESCE(excluded.parent_broker_order_id,
+                                            orders.parent_broker_order_id),
+            signal_timestamp=COALESCE(excluded.signal_timestamp, orders.signal_timestamp),
+            reference_price=COALESCE(excluded.reference_price, orders.reference_price),
+            submitted_at=COALESCE(excluded.submitted_at, orders.submitted_at),
+            filled_at=COALESCE(excluded.filled_at, orders.filled_at),
+            filled_qty=COALESCE(excluded.filled_qty, orders.filled_qty),
+            filled_avg_price=COALESCE(excluded.filled_avg_price, orders.filled_avg_price)
+        """, orders)
+
+
+def managed_order_roots(limit: int = 5000) -> list[dict]:
     with connect() as db:
         return db.execute("""
-          SELECT client_order_id, broker_order_id, signal_id, symbol, pool, status, created_at
+          SELECT client_order_id, broker_order_id, signal_id, symbol, pool, status,
+                 signal_timestamp, reference_price
           FROM orders
-          WHERE status NOT IN ('filled', 'canceled', 'expired', 'rejected', 'replaced',
-                               'done_for_day', 'suspended')
-          ORDER BY created_at DESC
-          LIMIT %s
+          WHERE parent_broker_order_id IS NULL
+          ORDER BY created_at DESC LIMIT %s
         """, (limit,)).fetchall()
+
+
+def managed_orders(limit: int = 3000) -> list[dict]:
+    with connect() as db:
+        return db.execute("""
+          SELECT client_order_id, broker_order_id, signal_id, symbol, side, pool, status,
+                 filled_qty, filled_avg_price
+          FROM orders ORDER BY created_at DESC LIMIT %s
+        """, (limit,)).fetchall()
+
+
+def managed_fills() -> list[dict]:
+    with connect() as db:
+        return db.execute("""
+          SELECT client_order_id, broker_order_id, signal_id, symbol, side, pool, qty,
+                 signal_timestamp, reference_price, submitted_at, filled_at,
+                 filled_qty, filled_avg_price
+          FROM orders
+          WHERE filled_qty > 0 AND filled_avg_price IS NOT NULL
+            AND side IN ('buy', 'sell')
+          ORDER BY COALESCE(filled_at, submitted_at, created_at), created_at
+        """).fetchall()
 
 
 def get_risk_state(session_date):
@@ -188,7 +253,8 @@ def managed_pool_assignments() -> dict[str, str]:
     with connect() as db:
         rows = db.execute("""
           SELECT DISTINCT ON (symbol) symbol, pool FROM orders
-          WHERE status IN ('accepted','filled','new','partially_filled','pending_new')
+          WHERE side='buy'
+            AND status IN ('accepted','filled','new','partially_filled','pending_new')
           ORDER BY symbol, created_at DESC
         """).fetchall()
     return {row["symbol"]: row["pool"] for row in rows}
@@ -198,7 +264,8 @@ def managed_order_id(symbol: str, pool: str):
     with connect() as db:
         row = db.execute("""
           SELECT broker_order_id FROM orders
-          WHERE symbol=%s AND pool=%s AND broker_order_id IS NOT NULL
+          WHERE symbol=%s AND pool=%s AND side='buy' AND parent_broker_order_id IS NULL
+            AND broker_order_id IS NOT NULL
             AND status IN ('accepted','filled','new','partially_filled','pending_new')
           ORDER BY created_at DESC LIMIT 1
         """, (symbol, pool)).fetchone()
@@ -209,7 +276,7 @@ def managed_order_stop_loss_pct(symbol: str, pool: str):
     with connect() as db:
         row = db.execute("""
           SELECT stop_loss_pct FROM orders
-          WHERE symbol=%s AND pool=%s AND stop_loss_pct IS NOT NULL
+          WHERE symbol=%s AND pool=%s AND side='buy' AND stop_loss_pct IS NOT NULL
             AND status IN ('accepted','filled','new','partially_filled','pending_new')
           ORDER BY created_at DESC LIMIT 1
         """, (symbol, pool)).fetchone()

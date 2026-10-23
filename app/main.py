@@ -5,10 +5,11 @@ from pydantic import BaseModel
 
 from app.market_data import get_daily_bars
 from app.database import (connect, get_risk_state, latest_account_snapshot, latest_backtest,
-                          latest_universe_snapshot, recent_closes)
+                          latest_universe_snapshot, managed_fills, recent_closes)
 from app.research import evaluate_walk_forward
 from app.settings import get_settings
 from app.storage import store_bars
+from app.trade_accounting import build_realized_trade_report
 
 settings = get_settings()
 app = FastAPI(title="Kube Trader", version="0.1.0")
@@ -148,6 +149,18 @@ def account_reconciliation():
         raise HTTPException(status_code=503, detail="Account database is unavailable") from exc
 
 
+@app.get("/trades")
+def trade_report(limit: int = Query(default=100, ge=1, le=1000)):
+    try:
+        report = build_realized_trade_report(managed_fills())
+        all_trades = report["trades"]
+        report["total_closed_trade_slices"] = len(all_trades)
+        report["trades"] = all_trades[-limit:]
+        return report
+    except Exception as exc:
+        raise HTTPException(status_code=503, detail="Trade report is unavailable") from exc
+
+
 @app.get("/risk")
 def risk_status():
     try:
@@ -160,4 +173,3 @@ def risk_status():
         return result
     except Exception as exc:
         raise HTTPException(status_code=503, detail="Risk database is unavailable") from exc
-
