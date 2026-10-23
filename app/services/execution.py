@@ -17,7 +17,8 @@ from alpaca.trading.requests import (GetOrdersRequest, MarketOrderRequest, StopL
 
 from app.database import (get_risk_state, init_db, managed_order_id, managed_order_stop_loss_pct,
                           managed_pool_assignments, managed_symbols, reserve_order,
-                          save_account_snapshot, save_risk_state, update_order)
+                          save_account_snapshot, save_risk_state, tracked_open_orders,
+                          update_order)
 from app.settings import get_settings
 from app.streams import SIGNAL_STREAM, client, ensure_group, read_group
 from app.universe import sector_for_symbol
@@ -50,6 +51,36 @@ def open_closing_orders(client_api: TradingClient, symbol: str, closing_side: Or
         and str(getattr(getattr(item, "side", ""), "value",
                         getattr(item, "side", ""))).lower() == closing_side.value
     ]
+
+
+def refresh_tracked_order_statuses(client_api: TradingClient):
+    for tracked in tracked_open_orders():
+        try:
+            order = (client_api.get_order_by_id(tracked["broker_order_id"])
+                     if tracked["broker_order_id"]
+                     else client_api.get_order_by_client_id(tracked["client_order_id"]))
+            status = str(getattr(order.status, "value", order.status)).lower()
+            if status == tracked["status"]:
+                continue
+            broker_order_id = str(order.id)
+            update_order(tracked["client_order_id"], broker_order_id, status)
+            log.info(
+                "Order status timestamp=%s signal_id=%s client_order_id=%s "
+                "broker_order_id=%s symbol=%s pool=%s status=%s filled_qty=%s "
+                "filled_avg_price=%s",
+                datetime.now(timezone.utc).isoformat(), tracked["signal_id"],
+                tracked["client_order_id"], broker_order_id, tracked["symbol"],
+                tracked["pool"], status, getattr(order, "filled_qty", None),
+                getattr(order, "filled_avg_price", None),
+            )
+        except Exception:
+            log.exception(
+                "Unable to refresh order status timestamp=%s signal_id=%s "
+                "client_order_id=%s broker_order_id=%s symbol=%s",
+                datetime.now(timezone.utc).isoformat(), tracked["signal_id"],
+                tracked["client_order_id"], tracked["broker_order_id"],
+                tracked["symbol"],
+            )
 
 
 def close_managed_position(client_api: TradingClient, symbol: str, pool: str,
@@ -278,8 +309,20 @@ def place_entry(client_api: TradingClient, event: dict, signal_id: str,
             existing = client_api.get_order_by_client_id(client_order_id)
             status = str(getattr(existing.status, "value", existing.status)).lower()
             update_order(client_order_id, str(existing.id), status)
+            log.info(
+                "Duplicate order suppressed timestamp=%s signal_timestamp=%s signal_id=%s "
+                "client_order_id=%s broker_order_id=%s symbol=%s pool=%s status=%s",
+                datetime.now(timezone.utc).isoformat(), event.get("ts"), signal_id,
+                client_order_id, existing.id, symbol, pool, status,
+            )
         except Exception:
-            log.info("Signal %s was already reserved; no duplicate order submitted", signal_id)
+            log.exception(
+                "Duplicate order reservation found but broker status lookup failed "
+                "timestamp=%s signal_timestamp=%s signal_id=%s client_order_id=%s "
+                "symbol=%s pool=%s",
+                datetime.now(timezone.utc).isoformat(), event.get("ts"), signal_id,
+                client_order_id, symbol, pool,
+            )
         return
     stop_price = max(round(price * (1 - stop_loss_pct), 2), 0.01)
     try:
@@ -303,13 +346,26 @@ def place_entry(client_api: TradingClient, event: dict, signal_id: str,
                 client_order_id=client_order_id,
             )
         order = client_api.submit_order(request)
-        update_order(client_order_id, str(order.id), "accepted")
-        mode = "paper" if settings.alpaca_paper else "LIVE"
-        log.warning("Submitted %s %s order %s qty=%s stop=%s",
-                    mode, pool, symbol, qty, stop_price)
     except Exception:
-        update_order(client_order_id, None, "rejected")
-        log.exception("Alpaca order submission failed for %s", symbol)
+        update_order(client_order_id, None, "submission_unknown")
+        log.exception(
+            "Order submission outcome unknown timestamp=%s signal_timestamp=%s signal_id=%s "
+            "client_order_id=%s symbol=%s pool=%s qty=%s",
+            datetime.now(timezone.utc).isoformat(), event.get("ts"), signal_id,
+            client_order_id, symbol, pool, qty,
+        )
+        return
+    status = str(getattr(order.status, "value", order.status)).lower()
+    broker_order_id = str(order.id)
+    update_order(client_order_id, broker_order_id, status)
+    mode = "paper" if settings.alpaca_paper else "LIVE"
+    log.warning(
+        "Order submitted timestamp=%s signal_timestamp=%s signal_id=%s "
+        "client_order_id=%s broker_order_id=%s mode=%s pool=%s symbol=%s "
+        "qty=%s stop=%s status=%s",
+        datetime.now(timezone.utc).isoformat(), event.get("ts"), signal_id,
+        client_order_id, broker_order_id, mode, pool, symbol, qty, stop_price, status,
+    )
 
 
 def handle_signal(client_api: TradingClient, event: dict, signal_id: str, risk: dict) -> bool:
@@ -358,6 +414,7 @@ def main():
         if time.monotonic() - last_reconcile >= settings.reconcile_interval_seconds:
             try:
                 _, _, risk = reconcile(client_api)
+                refresh_tracked_order_statuses(client_api)
             except Exception:
                 log.exception("Broker reconciliation failed; no entries will be processed")
                 risk = {"halted": True, "equity": 0.0, "buying_power": 0.0}

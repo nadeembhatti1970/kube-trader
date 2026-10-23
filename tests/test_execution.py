@@ -131,5 +131,87 @@ class CloseManagedPositionTests(unittest.TestCase):
         self.assertEqual(client.closed_symbols, [])
 
 
+class RefreshTrackedOrderStatusesTests(unittest.TestCase):
+    @patch("app.services.execution.update_order")
+    @patch("app.services.execution.tracked_open_orders")
+    def test_logs_and_persists_changed_broker_status(self, tracked_orders, update_order):
+        tracked_orders.return_value = [{
+            "client_order_id": "client-1",
+            "broker_order_id": "broker-1",
+            "signal_id": "signal-1",
+            "symbol": "AAPL",
+            "pool": "intraday",
+            "status": "accepted",
+        }]
+
+        class StatusClient:
+            def get_order_by_id(self, order_id):
+                self.order_id = order_id
+                return SimpleNamespace(
+                    id=order_id,
+                    status="filled",
+                    filled_qty="3",
+                    filled_avg_price="190.25",
+                )
+
+        client = StatusClient()
+        with self.assertLogs("execution", level="INFO") as captured:
+            execution.refresh_tracked_order_statuses(client)
+
+        update_order.assert_called_once_with("client-1", "broker-1", "filled")
+        self.assertIn("signal_id=signal-1", captured.output[0])
+        self.assertIn("broker_order_id=broker-1", captured.output[0])
+        self.assertIn("status=filled", captured.output[0])
+        self.assertIn("filled_avg_price=190.25", captured.output[0])
+
+    @patch("app.services.execution.update_order")
+    @patch("app.services.execution.tracked_open_orders")
+    def test_resolves_submission_with_unknown_outcome_by_client_order_id(
+        self, tracked_orders, update_order
+    ):
+        tracked_orders.return_value = [{
+            "client_order_id": "client-1",
+            "broker_order_id": None,
+            "signal_id": "signal-1",
+            "symbol": "AAPL",
+            "pool": "intraday",
+            "status": "submission_unknown",
+        }]
+
+        class StatusClient:
+            def get_order_by_client_id(self, client_order_id):
+                self.client_order_id = client_order_id
+                return SimpleNamespace(id="broker-1", status="rejected")
+
+        client = StatusClient()
+        with self.assertLogs("execution", level="INFO") as captured:
+            execution.refresh_tracked_order_statuses(client)
+
+        update_order.assert_called_once_with("client-1", "broker-1", "rejected")
+        self.assertIn("status=rejected", captured.output[0])
+        self.assertEqual(client.client_order_id, "client-1")
+
+    @patch("app.services.execution.update_order")
+    @patch("app.services.execution.tracked_open_orders")
+    def test_does_not_log_unchanged_broker_status(self, tracked_orders, update_order):
+        tracked_orders.return_value = [{
+            "client_order_id": "client-1",
+            "broker_order_id": "broker-1",
+            "signal_id": "signal-1",
+            "symbol": "AAPL",
+            "pool": "intraday",
+            "status": "accepted",
+        }]
+
+        class StatusClient:
+            def get_order_by_id(self, order_id):
+                return SimpleNamespace(id=order_id, status="accepted")
+
+        with self.assertNoLogs("execution", level="INFO"):
+            execution.refresh_tracked_order_statuses(StatusClient())
+
+        update_order.assert_not_called()
+
+
 if __name__ == "__main__":
     unittest.main()

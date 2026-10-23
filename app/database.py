@@ -136,8 +136,22 @@ def reserve_order(client_order_id: str, signal_id: str, symbol: str, qty: float,
 
 def update_order(client_order_id: str, broker_id: str | None, status: str):
     with connect() as db:
-        db.execute("UPDATE orders SET broker_order_id=%s, status=%s WHERE client_order_id=%s",
-                   (broker_id, status, client_order_id))
+        db.execute("""
+          UPDATE orders SET broker_order_id=COALESCE(%s, broker_order_id), status=%s
+          WHERE client_order_id=%s
+        """, (broker_id, status, client_order_id))
+
+
+def tracked_open_orders(limit: int = 100) -> list[dict]:
+    with connect() as db:
+        return db.execute("""
+          SELECT client_order_id, broker_order_id, signal_id, symbol, pool, status, created_at
+          FROM orders
+          WHERE status NOT IN ('filled', 'canceled', 'expired', 'rejected', 'replaced',
+                               'done_for_day', 'suspended')
+          ORDER BY created_at DESC
+          LIMIT %s
+        """, (limit,)).fetchall()
 
 
 def get_risk_state(session_date):
