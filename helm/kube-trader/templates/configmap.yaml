@@ -23,6 +23,8 @@ data:
   SWING_ATR_MULTIPLE: {{ .Values.config.swingAtrMultiple | quote }}
   CORE_STOP_LOSS_PCT: {{ .Values.config.coreStopLossPct | quote }}
   RECONCILE_INTERVAL_SECONDS: {{ .Values.config.reconcileIntervalSeconds | quote }}
+  ALPACA_ACTIVITY_SYNC_SECONDS: {{ .Values.config.alpacaActivitySyncSeconds | quote }}
+  ALPACA_ACTIVITY_LOOKBACK_DAYS: {{ .Values.config.alpacaActivityLookbackDays | quote }}
   MAX_SIGNAL_AGE_SECONDS: {{ .Values.config.maxSignalAgeSeconds | quote }}
   DATABASE_PATH: /data/market.db
   ETF_HOLDINGS_SYMBOL: {{ .Values.config.etfHoldingsSymbol | quote }}
@@ -41,4 +43,3 @@ data:
   BACKTEST_TRAIN_FRACTION: {{ .Values.config.backtestTrainFraction | quote }}
   INTRADAY_BACKTEST_BARS: {{ .Values.config.intradayBacktestBars | quote }}
   LOG_LEVEL: INFO
-

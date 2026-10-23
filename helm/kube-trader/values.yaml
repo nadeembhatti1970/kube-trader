@@ -41,6 +41,8 @@ config:
   backtestTrainFraction: "0.70"
   intradayBacktestBars: "50000"
   reconcileIntervalSeconds: "30"
+  alpacaActivitySyncSeconds: "300"
+  alpacaActivityLookbackDays: "30"
   maxSignalAgeSeconds: "180"
 persistence:
   enabled: true
@@ -61,4 +63,3 @@ resources:
   limits:
     cpu: 1
     memory: 1Gi
-
