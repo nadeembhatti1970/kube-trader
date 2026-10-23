@@ -244,15 +244,46 @@ def managed_orders(limit: int = 3000) -> list[dict]:
 
 
 def managed_fills() -> list[dict]:
+    """Bot-recorded order fills plus Alpaca FILL activities for orders the bot never recorded.
+
+    Broker-only fills (e.g. bracket exit legs or orders placed outside the bot) are aggregated
+    per Alpaca order and take the pool the bot used for that symbol, else "unattributed".
+    """
     with connect() as db:
         return db.execute("""
-          SELECT client_order_id, broker_order_id, signal_id, symbol, side, pool, qty,
-                 signal_timestamp, reference_price, submitted_at, filled_at,
-                 filled_qty, filled_avg_price, reference_timestamp, order_type, fees
-          FROM orders
-          WHERE filled_qty > 0 AND filled_avg_price IS NOT NULL
-            AND side IN ('buy', 'sell')
-          ORDER BY COALESCE(filled_at, submitted_at, created_at), created_at
+          WITH symbol_pool AS (
+            SELECT DISTINCT ON (symbol) symbol, pool
+            FROM orders WHERE pool IS NOT NULL
+            ORDER BY symbol, created_at DESC
+          ), broker_only AS (
+            SELECT 'broker-' || a.order_id AS client_order_id, a.order_id AS broker_order_id,
+                   NULL::text AS signal_id, a.symbol,
+                   CASE WHEN a.side LIKE 'buy%%' THEN 'buy' ELSE 'sell' END AS side,
+                   COALESCE(sp.pool, 'unattributed') AS pool, SUM(a.qty) AS qty,
+                   NULL::timestamptz AS signal_timestamp, NULL::double precision AS reference_price,
+                   NULL::timestamptz AS submitted_at, MAX(a.activity_at) AS filled_at,
+                   SUM(a.qty) AS filled_qty, SUM(a.qty * a.price) / SUM(a.qty) AS filled_avg_price,
+                   NULL::timestamptz AS reference_timestamp, NULL::text AS order_type,
+                   NULL::double precision AS fees
+            FROM broker_activities a
+            LEFT JOIN symbol_pool sp ON sp.symbol = a.symbol
+            WHERE a.activity_type = 'FILL' AND a.order_id IS NOT NULL AND a.qty > 0
+              AND a.price IS NOT NULL AND a.symbol IS NOT NULL
+              AND a.side IN ('buy', 'sell', 'sell_short', 'buy_to_cover')
+              AND NOT EXISTS (SELECT 1 FROM orders o WHERE o.broker_order_id = a.order_id)
+            GROUP BY a.order_id, a.symbol, a.side, sp.pool
+          ), recorded AS (
+            SELECT client_order_id, broker_order_id, signal_id, symbol, side, pool, qty,
+                   signal_timestamp, reference_price, submitted_at, filled_at,
+                   filled_qty, filled_avg_price, reference_timestamp, order_type, fees
+            FROM orders
+            WHERE filled_qty > 0 AND filled_avg_price IS NOT NULL
+              AND side IN ('buy', 'sell')
+          )
+          SELECT * FROM (
+            SELECT * FROM recorded UNION ALL SELECT * FROM broker_only
+          ) combined
+          ORDER BY COALESCE(filled_at, submitted_at), client_order_id
         """).fetchall()
 
 
@@ -384,16 +415,25 @@ def latest_broker_activities(limit: int = 500) -> list[dict]:
 
 
 def managed_symbols() -> set[str]:
-    """Symbols with a net open filled quantity or a live unfilled entry; closed ones are excluded."""
+    """Symbols with a net open filled quantity or a live unfilled entry; closed ones are excluded.
+
+    Net quantity includes Alpaca-reported exit fills the bot did not record. Fills that could not
+    be attributed to a bot pool do not make a symbol managed.
+    """
+    net: dict[str, float] = {}
+    for fill in managed_fills():
+        if fill["pool"] == "unattributed":
+            continue
+        sign = 1 if fill["side"] == "buy" else -1
+        net[fill["symbol"]] = net.get(fill["symbol"], 0.0) + sign * float(fill["filled_qty"])
     with connect() as db:
-        rows = db.execute("""
-          SELECT symbol FROM orders GROUP BY symbol
-          HAVING SUM(CASE WHEN side='buy' THEN COALESCE(filled_qty, 0)
-                          WHEN side='sell' THEN -COALESCE(filled_qty, 0) ELSE 0 END) > 0.000001
-            OR BOOL_OR(side='buy' AND COALESCE(filled_qty, 0) = 0
-                       AND status IN ('accepted','new','partially_filled','pending_new'))
+        pending = db.execute("""
+          SELECT DISTINCT symbol FROM orders
+          WHERE side='buy' AND COALESCE(filled_qty, 0) = 0
+            AND status IN ('accepted','new','partially_filled','pending_new')
         """).fetchall()
-    return {row["symbol"] for row in rows}
+    return {symbol for symbol, qty in net.items() if qty > 0.000001} | {
+        row["symbol"] for row in pending}
 
 
 def managed_pool_assignments() -> dict[str, str]:
