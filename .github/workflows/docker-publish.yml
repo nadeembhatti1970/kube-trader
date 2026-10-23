@@ -39,6 +39,18 @@ jobs:
             type=raw,value=latest,enable={{is_default_branch}}
             type=sha,format=long
 
+      - name: Calculate release version
+        id: release
+        run: |
+          chart_version="$(sed -n 's/^version: *"\{0,1\}\([0-9][0-9.]*\)"\{0,1\}$/\1/p' helm/kube-trader/Chart.yaml)"
+          if [[ ! "$chart_version" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "Unsupported Helm chart version: ${chart_version:-missing}" >&2
+            exit 1
+          fi
+
+          IFS=. read -r major minor patch <<< "$chart_version"
+          echo "version=$major.$minor.$((patch + 1))" >> "$GITHUB_OUTPUT"
+
       - name: Log in to Docker Hub
         uses: docker/login-action@v3
         with:
@@ -52,35 +64,27 @@ jobs:
           push: true
           tags: ${{ steps.metadata.outputs.tags }}
           labels: ${{ steps.metadata.outputs.labels }}
+          build-args: |
+            APP_VERSION=${{ steps.release.outputs.version }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
 
       - name: Update Helm chart image tag and version
-        id: chart
         env:
           IMAGE_TAG: sha-${{ github.sha }}
+          RELEASE_VERSION: ${{ steps.release.outputs.version }}
         run: |
           chart_file=helm/kube-trader/Chart.yaml
           values_file=helm/kube-trader/values.yaml
 
-          chart_version="$(sed -n 's/^version: *"\{0,1\}\([0-9][0-9.]*\)"\{0,1\}$/\1/p' "$chart_file")"
-          if [[ ! "$chart_version" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
-            echo "Unsupported Helm chart version: ${chart_version:-missing}" >&2
-            exit 1
-          fi
-
-          IFS=. read -r major minor patch <<< "$chart_version"
-          next_version="$major.$minor.$((patch + 1))"
-
           sed -i "s/^  tag: .*/  tag: $IMAGE_TAG/" "$values_file"
-          sed -i "s/^version: .*/version: $next_version/" "$chart_file"
-
-          echo "version=$next_version" >> "$GITHUB_OUTPUT"
+          sed -i "s/^version: .*/version: $RELEASE_VERSION/" "$chart_file"
+          sed -i "s/^appVersion: .*/appVersion: \"$RELEASE_VERSION\"/" "$chart_file"
 
       - name: Commit chart update
         env:
           IMAGE_TAG: sha-${{ github.sha }}
-          CHART_VERSION: ${{ steps.chart.outputs.version }}
+          CHART_VERSION: ${{ steps.release.outputs.version }}
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"

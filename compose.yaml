@@ -1,10 +1,14 @@
 name: kube-trader
 
 x-app-common: &app-common
-  build: .
+  build:
+    context: .
+    args:
+      APP_VERSION: ${APP_VERSION:-dev}
   image: kube-trader:local
   env_file: .env
   environment:
+    APP_VERSION: "${APP_VERSION:-dev}"
     ALPACA_PAPER: "${ALPACA_PAPER:-true}"
     ALPACA_ACTIVITY_SYNC_SECONDS: "${ALPACA_ACTIVITY_SYNC_SECONDS:-300}"
     ALPACA_ACTIVITY_LOOKBACK_DAYS: "${ALPACA_ACTIVITY_LOOKBACK_DAYS:-30}"

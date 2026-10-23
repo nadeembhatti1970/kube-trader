@@ -3,6 +3,7 @@ kind: ConfigMap
 metadata:
   name: {{ include "kube-trader.fullname" . }}
 data:
+  APP_VERSION: {{ .Chart.AppVersion | quote }}
   MARKET_DATA_PROVIDER: {{ .Values.config.marketDataProvider | quote }}
   ALPACA_PAPER: {{ .Values.config.alpacaPaper | quote }}
   ALPACA_DATA_FEED: {{ .Values.config.alpacaDataFeed | quote }}

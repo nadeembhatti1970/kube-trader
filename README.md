@@ -52,7 +52,7 @@ To manually reconcile a paper account, pause the execution Deployment, then comp
 
 Copy the sample environment file, then set API credentials for the selected endpoint. `.env` is ignored by Git. Leave `ALPACA_PAPER=true` for paper mode. Live mode requires `ALPACA_PAPER=false`, live API credentials, and `EXECUTION_ENABLED=true`; enabling that combination can place real orders.
 
-Local runs and Docker Compose read these activity-sync settings from `.env`; Compose also accepts shell or project `.env` overrides and defaults to 300 seconds and 30 days. In Helm deployments, override `config.alpacaActivitySyncSeconds` and `config.alpacaActivityLookbackDays` in your values file.
+Local runs and Docker Compose read these settings from `.env`; Compose also accepts shell or project `.env` overrides. `APP_VERSION` defaults to `dev` locally. GitHub Actions increments the Helm chart patch version for each published image, uses it as the application version in the image and chart, and the API displays that version. In Helm deployments, override activity sync settings with `config.alpacaActivitySyncSeconds` and `config.alpacaActivityLookbackDays` in your values file.
 
 ```sh
 cp .env.example .env

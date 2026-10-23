@@ -4,6 +4,7 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
 class Settings(BaseSettings):
+    app_version: str = "dev"
     market_data_provider: str = "yfinance"
     finnhub_api_key: str = ""
     alpaca_api_key: str = ""

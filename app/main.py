@@ -13,7 +13,7 @@ from app.storage import store_bars
 from app.trade_accounting import build_realized_trade_report
 
 settings = get_settings()
-app = FastAPI(title="Kube Trader", version="0.1.0")
+app = FastAPI(title="Kube Trader", version=settings.app_version)
 
 
 class Signal(BaseModel):
