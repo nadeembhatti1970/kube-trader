@@ -12,7 +12,8 @@ log = logging.getLogger("universe")
 DEFAULT_SECTORS = {
     "AAPL": "technology", "MSFT": "technology", "NVDA": "technology",
     "AVGO": "technology", "ORCL": "technology", "CRM": "technology",
-    "AMD": "technology", "AMZN": "consumer_discretionary", "GOOGL": "communication_services",
+    "AMD": "technology", "INTC": "technology", "PLTR": "technology",
+    "WDC": "technology", "MA": "financials", "AMZN": "consumer_discretionary", "GOOGL": "communication_services",
     "META": "communication_services", "NFLX": "communication_services",
     "TMUS": "communication_services", "JPM": "financials", "V": "financials",
     "XOM": "energy", "CVX": "energy",
