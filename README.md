@@ -159,6 +159,7 @@ The chart defaults to paper mode and all stream/execution switches to off. To en
 | `MAX_WATCHLIST_SYMBOLS` | `40` | Maximum selected symbols subscribed to the market stream |
 | `SYMBOL_SECTORS` | empty | Optional comma-separated `SYMBOL:sector` overrides for custom symbols |
 | `MAX_OPEN_POSITIONS` | `20` | Maximum total account positions before skipping new entries |
+| `EXTENDED_HOURS_SAMPLING_ENABLED` / `EXTENDED_HOURS_SAMPLE_SECONDS` | `false` / `300` (deploy files enable) | Read-only: the ingestion worker records quote spreads and `overnight_tradable` for the selected symbols in pre-market, after-hours and overnight sessions. It places no orders. View with `/research/extended-hours?days=7` |
 | `SYMBOL_LOSS_COOLDOWN_SECONDS` / `SYMBOL_DAILY_LOSS_LIMIT` | `0` / `0` (deploy files set `1800` / `50`) | Code default is disabled; the Helm chart, `k8s/app.yaml` and `.env.example` enable them. Block new entries in a symbol for N seconds after a losing exit, or once its realized loss today (New York date) reaches the dollar limit |
 | `MAX_SYMBOL_EXPOSURE_PCT` / `MAX_SECTOR_EXPOSURE_PCT` | `0.05` / `0.25` | Account-equity limits for a symbol and its configured sector group |
 | `MARKET_STREAM_ENABLED` | `false` | Starts the Alpaca minute-bar WebSocket consumer |

@@ -88,6 +88,14 @@ def init_db():
               last_success_at TIMESTAMPTZ, last_synced_at TIMESTAMPTZ,
               last_error TEXT
             );
+            CREATE TABLE IF NOT EXISTS extended_hours_samples (
+              sampled_at TIMESTAMPTZ NOT NULL, session TEXT NOT NULL, symbol TEXT NOT NULL,
+              feed TEXT NOT NULL, overnight_tradable BOOLEAN, overnight_halted BOOLEAN,
+              bid DOUBLE PRECISION, ask DOUBLE PRECISION,
+              bid_size DOUBLE PRECISION, ask_size DOUBLE PRECISION,
+              spread_bps DOUBLE PRECISION, quote_ts TIMESTAMPTZ,
+              PRIMARY KEY (sampled_at, symbol)
+            );
             CREATE TABLE IF NOT EXISTS universe_screen (
               symbol TEXT PRIMARY KEY, checked_at TIMESTAMPTZ NOT NULL DEFAULT now(),
               price DOUBLE PRECISION, avg_dollar_volume DOUBLE PRECISION,
@@ -515,3 +523,53 @@ def latest_universe_snapshot() -> list[dict]:
           FROM universe_screen ORDER BY selected DESC, avg_dollar_volume DESC NULLS LAST, symbol
         """).fetchall()
     return list(rows)
+
+
+def save_extended_hours_samples(rows: list[dict], retention_days: int = 30):
+    with connect() as db:
+        db.cursor().executemany("""
+          INSERT INTO extended_hours_samples(sampled_at, session, symbol, feed, overnight_tradable,
+            overnight_halted, bid, ask, bid_size, ask_size, spread_bps, quote_ts)
+          VALUES (%(sampled_at)s, %(session)s, %(symbol)s, %(feed)s, %(overnight_tradable)s,
+            %(overnight_halted)s, %(bid)s, %(ask)s, %(bid_size)s, %(ask_size)s,
+            %(spread_bps)s, %(quote_ts)s)
+          ON CONFLICT DO NOTHING
+        """, rows)
+        db.execute("DELETE FROM extended_hours_samples WHERE sampled_at < now() - make_interval(days => %s)",
+                   (retention_days,))
+
+
+def extended_hours_report(days: int = 7) -> dict:
+    """Spreads count only quotes at most 10 minutes old; stale quotes show as lower coverage."""
+    params = {"days": days}
+    with connect() as db:
+        sessions = db.execute("""
+          SELECT session, count(*) AS samples, count(DISTINCT symbol) AS symbols,
+                 min(sampled_at) AS first_sample, max(sampled_at) AS last_sample,
+                 round((100.0 * count(*) FILTER (WHERE spread_bps IS NOT NULL AND quote_ts >= sampled_at - interval '10 minutes')
+                        / count(*))::numeric, 1) AS fresh_quote_pct,
+                 round((percentile_cont(0.5) WITHIN GROUP (ORDER BY spread_bps)
+                        FILTER (WHERE quote_ts >= sampled_at - interval '10 minutes'))::numeric, 2) AS median_spread_bps,
+                 round((percentile_cont(0.9) WITHIN GROUP (ORDER BY spread_bps)
+                        FILTER (WHERE quote_ts >= sampled_at - interval '10 minutes'))::numeric, 2) AS p90_spread_bps
+          FROM extended_hours_samples
+          WHERE sampled_at >= now() - make_interval(days => %(days)s)
+          GROUP BY session ORDER BY session
+        """, params).fetchall()
+        symbols = db.execute("""
+          SELECT session, symbol, count(*) AS samples,
+                 bool_or(overnight_tradable) AS overnight_tradable,
+                 bool_or(overnight_halted) AS overnight_halted,
+                 round((100.0 * count(*) FILTER (WHERE spread_bps IS NOT NULL AND quote_ts >= sampled_at - interval '10 minutes')
+                        / count(*))::numeric, 1) AS fresh_quote_pct,
+                 round((percentile_cont(0.5) WITHIN GROUP (ORDER BY spread_bps)
+                        FILTER (WHERE quote_ts >= sampled_at - interval '10 minutes'))::numeric, 2) AS median_spread_bps,
+                 round((percentile_cont(0.9) WITHIN GROUP (ORDER BY spread_bps)
+                        FILTER (WHERE quote_ts >= sampled_at - interval '10 minutes'))::numeric, 2) AS p90_spread_bps,
+                 round((avg(bid_size + ask_size) FILTER (WHERE quote_ts >= sampled_at - interval '10 minutes'))::numeric, 0)
+                   AS avg_quoted_size
+          FROM extended_hours_samples
+          WHERE sampled_at >= now() - make_interval(days => %(days)s)
+          GROUP BY session, symbol ORDER BY session, median_spread_bps NULLS LAST, symbol
+        """, params).fetchall()
+    return {"days": days, "by_session": list(sessions), "by_symbol": list(symbols)}

@@ -4,7 +4,7 @@ from fastapi import FastAPI, HTTPException, Query, Request
 from pydantic import BaseModel
 
 from app.market_data import get_daily_bars
-from app.database import (connect, get_risk_state, latest_account_snapshot, latest_backtest,
+from app.database import (connect, extended_hours_report, get_risk_state, latest_account_snapshot, latest_backtest,
                           latest_broker_activities, latest_universe_snapshot, managed_fills,
                           broker_activity_summary, broker_activity_sync_status, recent_closes)
 from app.export_names import export_filename
@@ -213,6 +213,20 @@ def broker_account_report(limit: int = Query(default=200, ge=1, le=1000)):
         raise
     except Exception as exc:
         raise HTTPException(status_code=503, detail="Broker report is unavailable") from exc
+
+
+@app.get("/research/extended-hours")
+def extended_hours_liquidity(days: int = Query(default=7, ge=1, le=30)):
+    """Read-only quote spreads and overnight eligibility sampled outside regular hours."""
+    try:
+        report = extended_hours_report(days)
+    except Exception as exc:
+        raise HTTPException(status_code=503, detail="Extended-hours report is unavailable") from exc
+    report["sampling_enabled"] = settings.extended_hours_sampling_enabled
+    report["note"] = ("Spreads are in basis points of the mid price from the latest quote; "
+                      "overnight uses Alpaca's overnight feed, other sessions the configured feed. "
+                      "Exchange holidays are not modelled.")
+    return report
 
 
 @app.get("/trades")

@@ -30,6 +30,8 @@ class Settings(BaseSettings):
     execution_enabled: bool = False
     stop_management_enabled: bool = False
     market_stream_enabled: bool = False
+    extended_hours_sampling_enabled: bool = False
+    extended_hours_sample_seconds: int = 300
     max_trade_risk_pct: float = 0.01
     daily_drawdown_limit_pct: float = 0.03
     stop_loss_pct: float = 0.02

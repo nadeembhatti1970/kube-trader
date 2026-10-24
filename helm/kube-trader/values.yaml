@@ -24,6 +24,8 @@ config:
   symbolSectors: ""
   maxOpenPositions: "20"
   maxSymbolExposurePct: "0.05"
+  extendedHoursSamplingEnabled: "true"
+  extendedHoursSampleSeconds: "300"
   symbolLossCooldownSeconds: "1800"
   symbolDailyLossLimit: "50"
   maxSectorExposurePct: "0.25"

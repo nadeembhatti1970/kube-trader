@@ -1,11 +1,14 @@
 import asyncio
 import logging
-from datetime import timezone
+from datetime import datetime, timezone
 
 from alpaca.data.enums import DataFeed
+from alpaca.data.historical import StockHistoricalDataClient
 from alpaca.data.live import StockDataStream
+from alpaca.trading.client import TradingClient
 
-from app.database import init_db, record_bar, save_universe_snapshot
+from app.database import init_db, record_bar, save_extended_hours_samples, save_universe_snapshot
+from app.extended_hours import sample_once
 from app.settings import get_settings
 from app.streams import BAR_STREAM, publish
 from app.universe import select_symbols
@@ -66,7 +69,24 @@ async def main():
             except Exception:
                 log.exception("ETF universe refresh failed; retaining current subscriptions")
 
+    async def sample_extended_hours():
+        trading = TradingClient(settings.alpaca_api_key, settings.alpaca_secret_key,
+                                paper=settings.alpaca_paper, raw_data=True)
+        data = StockHistoricalDataClient(settings.alpaca_api_key, settings.alpaca_secret_key)
+        while True:
+            try:
+                rows = await asyncio.to_thread(sample_once, trading, data, list(symbols),
+                                               settings.alpaca_data_feed, datetime.now(timezone.utc))
+                if rows:
+                    await asyncio.to_thread(save_extended_hours_samples, rows)
+                    log.info("Recorded %s %s-session liquidity samples", len(rows), rows[0]["session"])
+            except Exception:
+                log.exception("Extended-hours sampling failed; retrying next interval")
+            await asyncio.sleep(max(60, settings.extended_hours_sample_seconds))
+
     asyncio.create_task(refresh_universe())
+    if settings.extended_hours_sampling_enabled:
+        asyncio.create_task(sample_extended_hours())
     log.info("Starting Alpaca %s minute-bar stream for ETF %s holdings: %s",
              feed.value, settings.etf_holdings_symbol, symbols)
     await asyncio.to_thread(stream.run)
