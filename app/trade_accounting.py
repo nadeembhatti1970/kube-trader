@@ -257,3 +257,34 @@ def build_realized_trade_report(fills: list[dict]) -> dict:
             "slices_missing_fees": sum(trade["fees"] is None for trade in trades),
         },
     }
+
+
+def symbol_entry_block(trades: list[dict], symbol: str, now: datetime, session_date,
+                       cooldown_seconds: int, daily_loss_limit: float, tz) -> str | None:
+    """Return why new entries for a symbol should pause after recent losses, or None.
+
+    A limit of 0 disables that check.
+    """
+    cooldown_until = None
+    session_loss = 0.0
+    for trade in trades:
+        if trade["symbol"] != symbol or not trade.get("exit_filled_at"):
+            continue
+        pnl = trade.get("gross_realized_pnl")
+        if pnl is None:
+            continue
+        exit_at = datetime.fromisoformat(trade["exit_filled_at"])
+        if exit_at.tzinfo is None:
+            exit_at = exit_at.replace(tzinfo=timezone.utc)
+        if exit_at.astimezone(tz).date() == session_date:
+            session_loss += pnl
+        if pnl < 0 and cooldown_seconds > 0:
+            until = exit_at.timestamp() + cooldown_seconds
+            if until > now.timestamp() and (cooldown_until is None or until > cooldown_until):
+                cooldown_until = until
+    if daily_loss_limit > 0 and session_loss <= -daily_loss_limit:
+        return f"{symbol} realized {session_loss:.2f} today, beyond the {daily_loss_limit:.2f} per-symbol loss limit"
+    if cooldown_until is not None:
+        remaining = int(cooldown_until - now.timestamp())
+        return f"{symbol} is cooling down for {remaining}s after a losing exit"
+    return None

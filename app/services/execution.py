@@ -27,7 +27,8 @@ from app.database import (broker_activity_sync_status, get_risk_state, init_db,
                           update_order)
 from app.settings import get_settings
 from app.streams import SIGNAL_STREAM, client, ensure_group, read_group
-from app.trade_accounting import build_realized_trade_report, reconcile_open_quantities
+from app.trade_accounting import (build_realized_trade_report, reconcile_open_quantities,
+                                 symbol_entry_block)
 from app.universe import sector_for_symbol
 
 logging.basicConfig(level=logging.INFO)
@@ -475,6 +476,14 @@ def place_entry(client_api: TradingClient, event: dict, signal_id: str,
            for order in open_orders for item in order_tree(order)):
         log.info("Ignoring entry for %s because an open buy order already exists", symbol)
         return
+    if settings.symbol_loss_cooldown_seconds > 0 or settings.symbol_daily_loss_limit > 0:
+        now = datetime.now(NY)
+        block = symbol_entry_block(
+            build_realized_trade_report(managed_fills())["trades"], symbol, now, now.date(),
+            settings.symbol_loss_cooldown_seconds, settings.symbol_daily_loss_limit, NY)
+        if block:
+            log.info("Ignoring entry: %s", block)
+            return
     price = float(event["price"])
     if price <= 0:
         return

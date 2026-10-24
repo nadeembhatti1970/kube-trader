@@ -24,6 +24,8 @@ config:
   symbolSectors: ""
   maxOpenPositions: "20"
   maxSymbolExposurePct: "0.05"
+  symbolLossCooldownSeconds: "1800"
+  symbolDailyLossLimit: "50"
   maxSectorExposurePct: "0.25"
   maxTradeRiskPct: "0.01"
   dailyDrawdownLimitPct: "0.03"

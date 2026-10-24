@@ -25,6 +25,8 @@ class Settings(BaseSettings):
     max_open_positions: int = 20
     max_symbol_exposure_pct: float = 0.05
     max_sector_exposure_pct: float = 0.25
+    symbol_loss_cooldown_seconds: int = 0
+    symbol_daily_loss_limit: float = 0.0
     execution_enabled: bool = False
     stop_management_enabled: bool = False
     market_stream_enabled: bool = False

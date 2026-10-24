@@ -38,6 +38,8 @@ data:
   MAX_WATCHLIST_SYMBOLS: {{ .Values.config.maxWatchlistSymbols | quote }}
   SYMBOL_SECTORS: {{ .Values.config.symbolSectors | quote }}
   MAX_OPEN_POSITIONS: {{ .Values.config.maxOpenPositions | quote }}
+  SYMBOL_LOSS_COOLDOWN_SECONDS: {{ .Values.config.symbolLossCooldownSeconds | quote }}
+  SYMBOL_DAILY_LOSS_LIMIT: {{ .Values.config.symbolDailyLossLimit | quote }}
   MAX_SYMBOL_EXPOSURE_PCT: {{ .Values.config.maxSymbolExposurePct | quote }}
   MAX_SECTOR_EXPOSURE_PCT: {{ .Values.config.maxSectorExposurePct | quote }}
   BACKTEST_COST_BPS: {{ .Values.config.backtestCostBps | quote }}

@@ -56,3 +56,37 @@ class SnapshotSerializationTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class SymbolEntryBlockTests(unittest.TestCase):
+    def setUp(self):
+        from datetime import datetime
+        from zoneinfo import ZoneInfo
+        self.tz = ZoneInfo("America/New_York")
+        self.now = datetime(2026, 10, 23, 12, 0, tzinfo=self.tz)
+        self.trades = [
+            {"symbol": "AMAT", "exit_filled_at": "2026-10-23T15:55:00+00:00",
+             "gross_realized_pnl": -10.0},
+            {"symbol": "AMAT", "exit_filled_at": "2026-10-23T14:00:00+00:00",
+             "gross_realized_pnl": -5.0},
+            {"symbol": "XOM", "exit_filled_at": "2026-10-23T15:55:00+00:00",
+             "gross_realized_pnl": 20.0},
+        ]
+
+    def block(self, symbol, cooldown=0, limit=0.0):
+        from app.trade_accounting import symbol_entry_block
+        return symbol_entry_block(self.trades, symbol, self.now, self.now.date(),
+                                  cooldown, limit, self.tz)
+
+    def test_disabled_by_default(self):
+        self.assertIsNone(self.block("AMAT"))
+
+    def test_cooldown_after_recent_loss_only(self):
+        self.assertIn("cooling down", self.block("AMAT", cooldown=900))
+        self.assertIsNone(self.block("AMAT", cooldown=60))
+        self.assertIsNone(self.block("XOM", cooldown=900))
+
+    def test_daily_loss_limit(self):
+        self.assertIn("loss limit", self.block("AMAT", limit=15))
+        self.assertIsNone(self.block("AMAT", limit=16))
+        self.assertIsNone(self.block("XOM", limit=1))
