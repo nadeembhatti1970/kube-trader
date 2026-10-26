@@ -86,6 +86,11 @@ class SymbolEntryBlockTests(unittest.TestCase):
         self.assertIsNone(self.block("AMAT", cooldown=60))
         self.assertIsNone(self.block("XOM", cooldown=900))
 
+    def test_accepts_datetime_exit_times(self):
+        from datetime import datetime, timezone
+        self.trades[0]["exit_filled_at"] = datetime(2026, 10, 23, 15, 55, tzinfo=timezone.utc)
+        self.assertIn("cooling down", self.block("AMAT", cooldown=900))
+
     def test_daily_loss_limit(self):
         self.assertIn("loss limit", self.block("AMAT", limit=15))
         self.assertIsNone(self.block("AMAT", limit=16))

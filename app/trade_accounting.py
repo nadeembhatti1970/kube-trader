@@ -273,7 +273,9 @@ def symbol_entry_block(trades: list[dict], symbol: str, now: datetime, session_d
         pnl = trade.get("gross_realized_pnl")
         if pnl is None:
             continue
-        exit_at = datetime.fromisoformat(trade["exit_filled_at"])
+        exit_at = trade["exit_filled_at"]
+        if isinstance(exit_at, str):
+            exit_at = datetime.fromisoformat(exit_at)
         if exit_at.tzinfo is None:
             exit_at = exit_at.replace(tzinfo=timezone.utc)
         if exit_at.astimezone(tz).date() == session_date:
