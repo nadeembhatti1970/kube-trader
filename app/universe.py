@@ -17,7 +17,7 @@ DEFAULT_SECTORS = {
     "META": "communication_services", "NFLX": "communication_services",
     "TMUS": "communication_services", "JPM": "financials", "V": "financials",
     "XOM": "energy", "CVX": "energy",
-    "LLY": "healthcare", "JNJ": "healthcare", "UNH": "healthcare",
+    "LLY": "healthcare", "JNJ": "healthcare", "UNH": "healthcare", "MDT": "healthcare",
     "WMT": "consumer_staples", "COST": "consumer_staples", "PG": "consumer_staples",
     "KO": "consumer_staples", "HD": "consumer_discretionary", "TSLA": "consumer_discretionary",
     "CAT": "industrials", "GE": "industrials", "NEE": "utilities",
