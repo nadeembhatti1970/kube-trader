@@ -401,3 +401,33 @@ class BackfillFillDataTests(unittest.TestCase):
         self.assertEqual(client.fetched, ["old-broker"])
         record = sync_orders.call_args.args[0][0]
         self.assertEqual(float(record["filled_qty"]), 3.0)
+
+
+class FlattenIntradayTests(unittest.TestCase):
+    def setUp(self):
+        from datetime import datetime, timedelta, timezone
+        now = datetime(2026, 10, 26, 19, 52, tzinfo=timezone.utc)
+        self.clock = SimpleNamespace(is_open=True, timestamp=now,
+                                     next_close=now + timedelta(minutes=8))
+        self.client = SimpleNamespace(get_clock=lambda: self.clock)
+        self.positions = [SimpleNamespace(symbol="AMZN", qty="19"),
+                          SimpleNamespace(symbol="JNJ", qty="18")]
+
+    def run_flatten(self, minutes):
+        with patch.object(execution.settings, "intraday_flatten_minutes", minutes), \
+                patch("app.services.execution.managed_pool_assignments",
+                      return_value={"AMZN": "intraday", "JNJ": "swing"}), \
+                patch("app.services.execution.close_managed_position",
+                      return_value=True) as close:
+            return execution.flatten_intraday_positions(self.client, self.positions), close
+
+    def test_closes_only_intraday_positions_inside_window(self):
+        closed, close = self.run_flatten(10)
+        self.assertEqual(closed, ["AMZN"])
+        self.assertEqual(close.call_args.args[1], "AMZN")
+
+    def test_disabled_or_outside_window_does_nothing(self):
+        self.assertEqual(self.run_flatten(0)[0], [])
+        self.assertEqual(self.run_flatten(5)[0], [])
+        self.clock.is_open = False
+        self.assertEqual(self.run_flatten(10)[0], [])

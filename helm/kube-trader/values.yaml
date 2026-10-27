@@ -26,6 +26,8 @@ config:
   maxSymbolExposurePct: "0.05"
   extendedHoursSamplingEnabled: "true"
   extendedHoursSampleSeconds: "300"
+  intradayFlattenMinutes: "10"
+  intradayEntryCutoffMinutes: "30"
   symbolLossCooldownSeconds: "1800"
   symbolDailyLossLimit: "50"
   maxSectorExposurePct: "0.25"

@@ -290,3 +290,10 @@ def symbol_entry_block(trades: list[dict], symbol: str, now: datetime, session_d
         remaining = int(cooldown_until - now.timestamp())
         return f"{symbol} is cooling down for {remaining}s after a losing exit"
     return None
+
+
+def minutes_to_close(clock) -> float | None:
+    """Minutes until the regular session closes, or None when the market is closed."""
+    if not getattr(clock, "is_open", False):
+        return None
+    return (clock.next_close - clock.timestamp).total_seconds() / 60

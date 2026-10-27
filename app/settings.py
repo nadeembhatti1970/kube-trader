@@ -25,6 +25,8 @@ class Settings(BaseSettings):
     max_open_positions: int = 20
     max_symbol_exposure_pct: float = 0.05
     max_sector_exposure_pct: float = 0.25
+    intraday_flatten_minutes: int = 0
+    intraday_entry_cutoff_minutes: int = 0
     symbol_loss_cooldown_seconds: int = 0
     symbol_daily_loss_limit: float = 0.0
     execution_enabled: bool = False

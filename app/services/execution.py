@@ -28,7 +28,7 @@ from app.database import (broker_activity_sync_status, get_risk_state, init_db,
 from app.settings import get_settings
 from app.streams import SIGNAL_STREAM, client, ensure_group, read_group
 from app.trade_accounting import (build_realized_trade_report, reconcile_open_quantities,
-                                 symbol_entry_block)
+                                 minutes_to_close, symbol_entry_block)
 from app.universe import sector_for_symbol
 
 logging.basicConfig(level=logging.INFO)
@@ -291,6 +291,32 @@ def close_managed_position(client_api: TradingClient, symbol: str, pool: str,
     return True
 
 
+def flatten_intraday_positions(client_api: TradingClient, positions) -> list[str]:
+    """Close intraday-pool positions shortly before the close; day-only exit legs expire at the bell."""
+    if settings.intraday_flatten_minutes <= 0:
+        return []
+    remaining = minutes_to_close(client_api.get_clock())
+    if remaining is None or remaining > settings.intraday_flatten_minutes:
+        return []
+    pools = managed_pool_assignments()
+    now = datetime.now(timezone.utc)
+    event = {"ts": now.isoformat(), "price": None}
+    closed = []
+    for position in positions:
+        symbol = position.symbol
+        if pools.get(symbol) != "intraday":
+            continue
+        try:
+            if close_managed_position(client_api, symbol, "intraday", positions,
+                                      "eod-flatten", event):
+                closed.append(symbol)
+        except Exception:
+            log.exception("End-of-day flatten failed for %s", symbol)
+    if closed:
+        log.warning("End-of-day flatten closed intraday positions: %s", ", ".join(closed))
+    return closed
+
+
 def notify_admin(message: str):
     if not settings.alert_webhook_url:
         log.critical("Alert webhook is not configured: %s", message)
@@ -464,6 +490,11 @@ def place_entry(client_api: TradingClient, event: dict, signal_id: str,
     if any(position.symbol == symbol for position in positions):
         log.info("Ignoring entry for already-held symbol %s", symbol)
         return
+    if event.get("pool", "intraday") == "intraday" and settings.intraday_entry_cutoff_minutes > 0:
+        remaining = minutes_to_close(client_api.get_clock())
+        if remaining is not None and remaining <= settings.intraday_entry_cutoff_minutes:
+            log.info("Ignoring intraday entry for %s: %.0f minutes to close", symbol, remaining)
+            return
     if len(positions) >= settings.max_open_positions:
         log.info("Ignoring entry for %s because MAX_OPEN_POSITIONS is reached", symbol)
         return
@@ -653,7 +684,8 @@ def main():
     while True:
         if time.monotonic() - last_reconcile >= settings.reconcile_interval_seconds:
             try:
-                _, _, risk, open_orders = reconcile(client_api)
+                _, positions, risk, open_orders = reconcile(client_api)
+                flatten_intraday_positions(client_api, positions)
                 refresh_tracked_order_statuses(client_api, open_orders)
             except Exception:
                 log.exception("Broker reconciliation failed; no entries will be processed")

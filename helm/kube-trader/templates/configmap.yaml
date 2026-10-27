@@ -40,6 +40,8 @@ data:
   MAX_OPEN_POSITIONS: {{ .Values.config.maxOpenPositions | quote }}
   EXTENDED_HOURS_SAMPLING_ENABLED: {{ .Values.config.extendedHoursSamplingEnabled | quote }}
   EXTENDED_HOURS_SAMPLE_SECONDS: {{ .Values.config.extendedHoursSampleSeconds | quote }}
+  INTRADAY_FLATTEN_MINUTES: {{ .Values.config.intradayFlattenMinutes | quote }}
+  INTRADAY_ENTRY_CUTOFF_MINUTES: {{ .Values.config.intradayEntryCutoffMinutes | quote }}
   SYMBOL_LOSS_COOLDOWN_SECONDS: {{ .Values.config.symbolLossCooldownSeconds | quote }}
   SYMBOL_DAILY_LOSS_LIMIT: {{ .Values.config.symbolDailyLossLimit | quote }}
   MAX_SYMBOL_EXPOSURE_PCT: {{ .Values.config.maxSymbolExposurePct | quote }}
