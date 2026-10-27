@@ -165,7 +165,7 @@ The chart defaults to paper mode and all stream/execution switches to off. To en
 | `MAX_SYMBOL_EXPOSURE_PCT` / `MAX_SECTOR_EXPOSURE_PCT` | `0.05` / `0.25` | Account-equity limits for a symbol and its configured sector group |
 | `MARKET_STREAM_ENABLED` | `false` | Starts the Alpaca minute-bar WebSocket consumer |
 | `EXECUTION_ENABLED` | `false` | Enables automated entries/exits on the selected endpoint |
-| `STOP_MANAGEMENT_ENABLED` | `false` | Repairs missing stops on bot-managed positions |
+| `STOP_MANAGEMENT_ENABLED` | `false` (deploy files set `true`) | Repairs missing stops on bot-managed positions |
 | `MAX_TRADE_RISK_PCT` | `0.01` | Maximum account-equity loss budget per entry |
 | `DAILY_DRAWDOWN_LIMIT_PCT` | `0.03` | Entry halt threshold for the current New York date |
 | `STOP_LOSS_PCT` / `TAKE_PROFIT_PCT` | `0.02` / `0.04` | Default bracket exit distances |

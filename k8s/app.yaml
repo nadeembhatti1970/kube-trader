@@ -9,7 +9,7 @@ data:
   MARKET_DATA_PROVIDER: yfinance
   MARKET_STREAM_ENABLED: "false"
   EXECUTION_ENABLED: "false"
-  STOP_MANAGEMENT_ENABLED: "false"
+  STOP_MANAGEMENT_ENABLED: "true"
   REDIS_URL: redis://redis:6379/0
   DATABASE_PATH: /data/market.db
   ETF_HOLDINGS_SYMBOL: SPY
