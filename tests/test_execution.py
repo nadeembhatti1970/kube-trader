@@ -146,6 +146,31 @@ class CloseManagedPositionTests(unittest.TestCase):
         self.assertEqual(client.cancelled_order_ids, [])
         self.assertEqual(client.closed_symbols, [])
 
+    @patch("app.services.execution.managed_order_id", return_value=None)
+    def test_flatten_cancels_bot_protective_stop_before_closing(self, _):
+        protective_stop = SimpleNamespace(
+            id="protect-order",
+            client_order_id="kt-protect-test",
+            symbol="AAPL",
+            side=OrderSide.SELL,
+            status="new",
+        )
+
+        class FlattenClient(FakeTradingClient):
+            def cancel_order_by_id(self, order_id):
+                super().cancel_order_by_id(order_id)
+                self.open_orders = []
+
+        client = FlattenClient([protective_stop])
+        handled = execution.close_managed_position(
+            client, "AAPL", "intraday", [self.position], "eod-flatten",
+            self.signal_event, cancel_protective_stop=True,
+        )
+
+        self.assertTrue(handled)
+        self.assertEqual(client.cancelled_order_ids, ["protect-order"])
+        self.assertEqual(client.closed_symbols, ["AAPL"])
+
     @patch("app.services.execution.managed_order_id", return_value="entry-order")
     def test_propagates_unrelated_cancellation_errors(self, _):
         class FailingTradingClient(FakeTradingClient):
@@ -401,6 +426,31 @@ class BackfillFillDataTests(unittest.TestCase):
         self.assertEqual(client.fetched, ["old-broker"])
         record = sync_orders.call_args.args[0][0]
         self.assertEqual(float(record["filled_qty"]), 3.0)
+
+
+class OrphanedProtectiveStopTests(unittest.TestCase):
+    def test_reports_only_bot_stops_without_a_matching_position(self):
+        stops = [
+            SimpleNamespace(id="orphan", client_order_id="kt-protect-a",
+                            symbol="INTC", side=OrderSide.SELL, type="stop",
+                            qty="1", stop_price="91.25"),
+            SimpleNamespace(id="held", client_order_id="kt-protect-b",
+                            symbol="AAPL", side=OrderSide.SELL, type="stop",
+                            qty="3", stop_price="95"),
+            SimpleNamespace(id="manual", client_order_id="manual-order",
+                            symbol="WMT", side=OrderSide.SELL, type="stop",
+                            qty="1", stop_price="117"),
+        ]
+        result = execution.orphaned_protective_stops(
+            stops, [SimpleNamespace(symbol="AAPL")])
+
+        self.assertEqual(result, [{
+            "symbol": "INTC",
+            "broker_order_id": "orphan",
+            "side": "sell",
+            "qty": "1",
+            "stop_price": "91.25",
+        }])
 
 
 class FlattenIntradayTests(unittest.TestCase):

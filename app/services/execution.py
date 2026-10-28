@@ -108,6 +108,27 @@ def open_closing_orders(client_api: TradingClient, symbol: str, closing_side: Or
     ]
 
 
+def orphaned_protective_stops(open_orders, positions) -> list[dict]:
+    held_symbols = {position.symbol for position in positions}
+    orphaned = []
+    for order in open_orders:
+        for item in order_tree(order):
+            client_order_id = str(getattr(item, "client_order_id", "") or "")
+            order_type = broker_order_type(item) or ""
+            symbol = getattr(item, "symbol", None)
+            if (client_order_id.startswith("kt-protect-") and "stop" in order_type
+                    and symbol and symbol not in held_symbols):
+                orphaned.append({
+                    "symbol": symbol,
+                    "broker_order_id": str(getattr(item, "id", "")),
+                    "side": str(getattr(getattr(item, "side", ""), "value",
+                                        getattr(item, "side", ""))).lower(),
+                    "qty": str(getattr(item, "qty", "")),
+                    "stop_price": str(getattr(item, "stop_price", "")),
+                })
+    return orphaned
+
+
 def refresh_tracked_order_statuses(client_api: TradingClient, open_orders=None):
     roots = managed_order_roots()
     roots_by_client_id = {row["client_order_id"]: row for row in roots}
@@ -220,8 +241,9 @@ def refresh_tracked_order_statuses(client_api: TradingClient, open_orders=None):
 
 
 def close_managed_position(client_api: TradingClient, symbol: str, pool: str,
-                           positions, signal_id: str, event: dict) -> bool:
-    """Cancel attached exit legs before closing so a protective order cannot oversell."""
+                           positions, signal_id: str, event: dict,
+                           cancel_protective_stop: bool = False) -> bool:
+    """Cancel conflicting managed exits before closing so they cannot oversell."""
     position = next((item for item in positions if item.symbol == symbol), None)
     if position is None:
         return True
@@ -246,6 +268,21 @@ def close_managed_position(client_api: TradingClient, symbol: str, pool: str,
                         raise
                     log.info("Exit order %s for %s is already pending cancellation",
                              item.id, symbol)
+
+    if cancel_protective_stop:
+        for order in open_closing_orders(client_api, symbol, closing_side):
+            client_order_id = str(getattr(order, "client_order_id", "") or "")
+            if not client_order_id.startswith("kt-protect-"):
+                continue
+            try:
+                client_api.cancel_order_by_id(order.id)
+                log.info("Cancelling managed protective stop %s before flattening %s",
+                         order.id, symbol)
+            except APIError as exc:
+                if "order pending cancel" not in str(exc).lower():
+                    raise
+                log.info("Protective stop %s for %s is already pending cancellation",
+                         order.id, symbol)
 
     deadline = time.monotonic() + 5
     while True:
@@ -308,7 +345,8 @@ def flatten_intraday_positions(client_api: TradingClient, positions) -> list[str
             continue
         try:
             if close_managed_position(client_api, symbol, "intraday", positions,
-                                      "eod-flatten", event):
+                                      "eod-flatten", event,
+                                      cancel_protective_stop=True):
                 closed.append(symbol)
         except Exception:
             log.exception("End-of-day flatten failed for %s", symbol)
@@ -351,6 +389,7 @@ def reconcile(client_api: TradingClient):
 
     broker_positions = []
     stop_gaps = []
+    orphaned_stops = orphaned_protective_stops(open_orders, positions)
     pool_by_symbol = managed_pool_assignments()
     exposures = {pool: 0.0 for pool in POOL_WEIGHTS}
     sector_exposures = {}
@@ -427,9 +466,15 @@ def reconcile(client_api: TradingClient):
         warnings.append(
             f"{len(ledger_check['discrepancies'])} symbols differ between the order ledger and "
             "Alpaca; Alpaca positions are treated as authoritative")
+    if orphaned_stops:
+        symbols = ", ".join(sorted({item["symbol"] for item in orphaned_stops}))
+        warnings.append(
+            "Bot protective stop orders are open for symbols with no broker position: "
+            + symbols)
     diffs = {"untracked_broker_positions": sorted(broker_symbols - known),
              "managed_positions_missing_at_broker": sorted(known - broker_symbols),
              "positions_missing_protective_stop": stop_gaps,
+             "orphaned_protective_stops": orphaned_stops,
              "ledger_discrepancies": ledger_check["discrepancies"],
              "unclassified_symbols": unclassified,
              "warnings": warnings,
