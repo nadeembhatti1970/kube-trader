@@ -17,11 +17,12 @@ from alpaca.trading.requests import (GetOrderByIdRequest, GetOrdersRequest, Mark
 
 from app.alpaca_reporting import (fetch_account_activities, serialize_account,
                                  serialize_order, serialize_position)
-from app.database import (broker_activity_sync_status, get_risk_state, init_db,
+from app.database import (broker_activity_sync_status, fill_order_ids_missing_type,
+                          get_risk_state, init_db,
                           managed_fills, managed_order_id, managed_order_stop_loss_pct,
                           managed_order_roots, managed_orders, managed_pool_assignments,
                           managed_symbols, orders_missing_fill_data, reserve_order,
-                          save_account_snapshot,
+                          save_account_snapshot, save_broker_order_type,
                           save_broker_activities, save_risk_state, sync_managed_orders,
                           update_broker_activity_sync, update_latest_account_orders,
                           update_order)
@@ -94,6 +95,21 @@ def sync_broker_account_activities():
                     "Alpaca %s account activity sync failed; reports may be stale",
                     activity_type,
                 )
+
+
+def backfill_fill_order_types(client_api: TradingClient, limit: int = 25) -> int:
+    """Record the type of filled orders the bot never tracked, mainly bracket stop and take-profit legs."""
+    stored = 0
+    for broker_order_id in fill_order_ids_missing_type(limit):
+        try:
+            order_type = broker_order_type(client_api.get_order_by_id(broker_order_id))
+        except Exception:
+            log.exception("Unable to fetch order type for %s", broker_order_id)
+            continue
+        if order_type:
+            save_broker_order_type(broker_order_id, order_type)
+            stored += 1
+    return stored
 
 
 def open_closing_orders(client_api: TradingClient, symbol: str, closing_side: OrderSide):
@@ -768,6 +784,7 @@ def main():
         if time.monotonic() - last_activity_sync >= settings.alpaca_activity_sync_seconds:
             try:
                 sync_broker_account_activities()
+                backfill_fill_order_types(client_api)
             except Exception:
                 log.exception("Alpaca account activity synchronization failed")
             last_activity_sync = time.monotonic()

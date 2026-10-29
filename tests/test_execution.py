@@ -492,6 +492,26 @@ class CancelOrphanedStopTests(unittest.TestCase):
         self.assertEqual([item["symbol"] for item in remaining], ["INTC"])
 
 
+class BackfillOrderTypeTests(unittest.TestCase):
+    def test_stores_types_and_skips_failures_and_missing_types(self):
+        orders = {"stop-leg": SimpleNamespace(type="stop"),
+                  "no-type": SimpleNamespace(type=None)}
+
+        def get_order_by_id(order_id):
+            if order_id == "broken":
+                raise RuntimeError("boom")
+            return orders[order_id]
+
+        client = SimpleNamespace(get_order_by_id=get_order_by_id)
+        with patch("app.services.execution.fill_order_ids_missing_type",
+                   return_value=["stop-leg", "broken", "no-type"]), \
+                patch("app.services.execution.save_broker_order_type") as save:
+            stored = execution.backfill_fill_order_types(client)
+
+        self.assertEqual(stored, 1)
+        save.assert_called_once_with("stop-leg", "stop")
+
+
 class FlattenIntradayTests(unittest.TestCase):
     def setUp(self):
         from datetime import datetime, timedelta, timezone

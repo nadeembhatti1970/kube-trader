@@ -59,6 +59,10 @@ def init_db():
             ALTER TABLE orders ADD COLUMN IF NOT EXISTS reference_timestamp TIMESTAMPTZ;
             ALTER TABLE orders ADD COLUMN IF NOT EXISTS order_type TEXT;
             ALTER TABLE orders ADD COLUMN IF NOT EXISTS fees DOUBLE PRECISION;
+            CREATE TABLE IF NOT EXISTS broker_order_types (
+              broker_order_id TEXT PRIMARY KEY, order_type TEXT NOT NULL,
+              fetched_at TIMESTAMPTZ NOT NULL DEFAULT now()
+            );
             CREATE TABLE IF NOT EXISTS account_snapshots (
               captured_at TIMESTAMPTZ PRIMARY KEY, equity DOUBLE PRECISION NOT NULL,
               buying_power DOUBLE PRECISION NOT NULL, positions JSONB NOT NULL,
@@ -263,6 +267,29 @@ def orders_missing_fill_data(limit: int = 50) -> list[str]:
     return [row["broker_order_id"] for row in rows]
 
 
+def fill_order_ids_missing_type(limit: int = 50) -> list[str]:
+    """Broker ids of filled orders (e.g. bracket exit legs) whose order type was never stored."""
+    with connect() as db:
+        rows = db.execute("""
+          SELECT a.order_id FROM broker_activities a
+          LEFT JOIN orders o ON o.broker_order_id = a.order_id
+          LEFT JOIN broker_order_types t ON t.broker_order_id = a.order_id
+          WHERE a.activity_type = 'FILL' AND a.order_id IS NOT NULL
+            AND o.order_type IS NULL AND t.broker_order_id IS NULL
+          GROUP BY a.order_id ORDER BY MAX(a.activity_at) DESC LIMIT %s
+        """, (limit,)).fetchall()
+    return [row["order_id"] for row in rows]
+
+
+def save_broker_order_type(broker_order_id: str, order_type: str):
+    with connect() as db:
+        db.execute("""
+          INSERT INTO broker_order_types(broker_order_id, order_type) VALUES (%s, %s)
+          ON CONFLICT(broker_order_id) DO UPDATE SET order_type=excluded.order_type,
+            fetched_at=now()
+        """, (broker_order_id, order_type))
+
+
 def managed_fills() -> list[dict]:
     """Bot-recorded order fills plus Alpaca FILL activities for orders the bot never recorded.
 
@@ -288,9 +315,10 @@ def managed_fills() -> list[dict]:
                    COALESCE(o.pool, sp.pool, 'unattributed') AS pool, f.qty,
                    o.signal_timestamp, o.reference_price, o.submitted_at, f.filled_at,
                    f.qty AS filled_qty, f.avg_price AS filled_avg_price,
-                   o.reference_timestamp, o.order_type, o.fees
+                   o.reference_timestamp, COALESCE(o.order_type, t.order_type) AS order_type, o.fees
             FROM activity_fills f
             LEFT JOIN orders o ON o.broker_order_id = f.order_id
+            LEFT JOIN broker_order_types t ON t.broker_order_id = f.order_id
             LEFT JOIN LATERAL (
               SELECT p.pool FROM orders p
               WHERE p.symbol = f.symbol AND p.pool IS NOT NULL
