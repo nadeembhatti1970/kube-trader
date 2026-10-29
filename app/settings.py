@@ -43,6 +43,8 @@ class Settings(BaseSettings):
     core_allocation_pct: float = 0.50
     signal_fast_bars: int = 5
     signal_slow_bars: int = 20
+    signal_min_spread_pct: float = 0.001
+    signal_min_buy_rsi: float = 55.0
     swing_atr_period: int = 14
     swing_atr_multiple: float = 2.0
     core_stop_loss_pct: float = 0.20

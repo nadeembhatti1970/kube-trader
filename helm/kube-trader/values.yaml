@@ -40,6 +40,8 @@ config:
   coreAllocationPct: "0.50"
   signalFastBars: "5"
   signalSlowBars: "20"
+  signalMinSpreadPct: "0.001"
+  signalMinBuyRsi: "55"
   swingAtrPeriod: "14"
   swingAtrMultiple: "2.0"
   coreStopLossPct: "0.20"

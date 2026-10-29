@@ -28,6 +28,13 @@ def rsi(closes: list[float], period: int = 14) -> float:
     return 100.0 - (100.0 / (1.0 + gains / losses))
 
 
+def entry_confirmed(fast: float, slow: float, rsi_value: float) -> bool:
+    """A buy crossover must be decisive and show momentum, which filters minute-bar noise."""
+    spread = (fast - slow) / slow if slow else 0.0
+    return (spread >= settings.signal_min_spread_pct
+            and rsi_value >= settings.signal_min_buy_rsi)
+
+
 def daily_bars_for_signal(symbol: str) -> list[dict]:
     """Fetch/cache completed daily bars; exclude today's still-forming candle."""
     today = datetime.now(NY).date()
@@ -135,6 +142,10 @@ def main():
                         slow = sum(values[-settings.signal_slow_bars:]) / settings.signal_slow_bars
                         above = fast > slow
                         previous = strategy_is_above(event["symbol"])
+                        rsi_value = rsi(values)
+                        # Leave the state unchanged for an unconfirmed buy so a later bar can confirm it.
+                        if above and not previous and not entry_confirmed(fast, slow, rsi_value):
+                            above = previous
                         save_strategy_state(event["symbol"], above)
                         if above != previous:
                             action = "buy" if above else "sell"
@@ -144,7 +155,7 @@ def main():
                                 "stop_loss_pct": settings.stop_loss_pct,
                                 "take_profit_pct": settings.take_profit_pct,
                                 "fast_sma": fast, "slow_sma": slow,
-                                "rsi_14": rsi(values), "ts": event["ts"],
+                                "rsi_14": rsi_value, "ts": event["ts"],
                             })
                     output_signals.extend(daily_signals(
                         event["symbol"], float(event["close"]), event["ts"]

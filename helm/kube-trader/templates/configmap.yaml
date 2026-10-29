@@ -20,6 +20,8 @@ data:
   CORE_ALLOCATION_PCT: {{ .Values.config.coreAllocationPct | quote }}
   SIGNAL_FAST_BARS: {{ .Values.config.signalFastBars | quote }}
   SIGNAL_SLOW_BARS: {{ .Values.config.signalSlowBars | quote }}
+  SIGNAL_MIN_SPREAD_PCT: {{ .Values.config.signalMinSpreadPct | quote }}
+  SIGNAL_MIN_BUY_RSI: {{ .Values.config.signalMinBuyRsi | quote }}
   SWING_ATR_PERIOD: {{ .Values.config.swingAtrPeriod | quote }}
   SWING_ATR_MULTIPLE: {{ .Values.config.swingAtrMultiple | quote }}
   CORE_STOP_LOSS_PCT: {{ .Values.config.coreStopLossPct | quote }}

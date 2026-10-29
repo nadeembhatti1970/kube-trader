@@ -171,6 +171,7 @@ The chart defaults to paper mode and all stream/execution switches to off. To en
 | `STOP_LOSS_PCT` / `TAKE_PROFIT_PCT` | `0.02` / `0.04` | Default bracket exit distances |
 | `INTRADAY_ALLOCATION_PCT` / `SWING_ALLOCATION_PCT` / `CORE_ALLOCATION_PCT` | `0.20` / `0.30` / `0.50` | Virtual portfolio pool targets; must sum to 1.0 |
 | `SIGNAL_FAST_BARS` / `SIGNAL_SLOW_BARS` | `5` / `20` | SMA periods, in minute bars |
+| `SIGNAL_MIN_SPREAD_PCT` / `SIGNAL_MIN_BUY_RSI` | `0.001` / `55` | An intraday buy needs the fast SMA at least this fraction above the slow SMA and RSI(14) at or above this level. An unconfirmed crossover is not recorded, so the buy can still fire on a later bar. Sell crossovers are never filtered. Set `0` / `0` for the previous behaviour |
 | `SWING_ATR_PERIOD` / `SWING_ATR_MULTIPLE` | `14` / `2.0` | Daily ATR stop distance for swing orders |
 | `CORE_STOP_LOSS_PCT` | `0.20` | Core GTC protective stop distance (20% default) |
 | `BACKTEST_COST_BPS` / `BACKTEST_TRAIN_FRACTION` | `5` / `0.70` | Research endpoint's estimated one-way costs and chronological train split |
