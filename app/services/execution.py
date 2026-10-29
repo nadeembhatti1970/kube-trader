@@ -129,6 +129,32 @@ def orphaned_protective_stops(open_orders, positions) -> list[dict]:
     return orphaned
 
 
+def cancel_orphaned_protective_stops(client_api: TradingClient, orphaned: list[dict]) -> list[dict]:
+    """Cancel bot stops whose position is gone; a triggered stop would open an unintended short."""
+    if not orphaned:
+        return []
+    # Re-read positions so a position opened since the reconcile snapshot keeps its stop.
+    held_symbols = {position.symbol for position in client_api.get_all_positions()}
+    remaining = []
+    for item in orphaned:
+        if item["symbol"] in held_symbols:
+            remaining.append(item)
+            continue
+        try:
+            client_api.cancel_order_by_id(item["broker_order_id"])
+            log.warning("Cancelled orphaned protective stop %s for %s",
+                        item["broker_order_id"], item["symbol"])
+        except APIError as exc:
+            if "order pending cancel" in str(exc).lower():
+                log.info("Orphaned protective stop %s for %s is already pending cancellation",
+                         item["broker_order_id"], item["symbol"])
+                continue
+            log.exception("Unable to cancel orphaned protective stop %s for %s",
+                          item["broker_order_id"], item["symbol"])
+            remaining.append(item)
+    return remaining
+
+
 def refresh_tracked_order_statuses(client_api: TradingClient, open_orders=None):
     roots = managed_order_roots()
     roots_by_client_id = {row["client_order_id"]: row for row in roots}
@@ -390,6 +416,8 @@ def reconcile(client_api: TradingClient):
     broker_positions = []
     stop_gaps = []
     orphaned_stops = orphaned_protective_stops(open_orders, positions)
+    if settings.stop_management_enabled:
+        orphaned_stops = cancel_orphaned_protective_stops(client_api, orphaned_stops)
     pool_by_symbol = managed_pool_assignments()
     exposures = {pool: 0.0 for pool in POOL_WEIGHTS}
     sector_exposures = {}
@@ -703,6 +731,7 @@ def handle_signal(client_api: TradingClient, event: dict, signal_id: str, risk: 
         ):
             return close_managed_position(
                 client_api, event["symbol"], event_pool, positions, signal_id, event,
+                cancel_protective_stop=settings.stop_management_enabled,
             )
         return True
     place_entry(client_api, event, signal_id, account, positions, risk)

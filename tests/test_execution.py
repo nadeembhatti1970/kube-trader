@@ -453,6 +453,45 @@ class OrphanedProtectiveStopTests(unittest.TestCase):
         }])
 
 
+class CancelOrphanedStopTests(unittest.TestCase):
+    ORPHANS = [
+        {"symbol": "INTC", "broker_order_id": "o1", "side": "sell", "qty": "1", "stop_price": "91"},
+        {"symbol": "AAPL", "broker_order_id": "o2", "side": "sell", "qty": "3", "stop_price": "95"},
+    ]
+
+    def make_client(self, held, cancel_error=None):
+        client = FakeTradingClient([])
+        client.get_all_positions = lambda: [SimpleNamespace(symbol=s) for s in held]
+        if cancel_error:
+            def cancel(order_id):
+                client.cancelled_order_ids.append(order_id)
+                raise cancel_error
+            client.cancel_order_by_id = cancel
+        return client
+
+    def test_cancels_stops_without_a_position_and_keeps_newly_held(self):
+        client = self.make_client(held=["AAPL"])
+        remaining = execution.cancel_orphaned_protective_stops(client, self.ORPHANS)
+
+        self.assertEqual(client.cancelled_order_ids, ["o1"])
+        self.assertEqual([item["symbol"] for item in remaining], ["AAPL"])
+
+    def test_nothing_to_cancel_makes_no_broker_calls(self):
+        client = self.make_client(held=[])
+        self.assertEqual(execution.cancel_orphaned_protective_stops(client, []), [])
+        self.assertEqual(client.cancelled_order_ids, [])
+
+    def test_pending_cancel_is_not_reported_again_but_other_errors_are(self):
+        pending = execution.APIError('{"code":42210000,"message":"order pending cancel"}')
+        client = self.make_client(held=[], cancel_error=pending)
+        self.assertEqual(execution.cancel_orphaned_protective_stops(client, self.ORPHANS[:1]), [])
+
+        failing = execution.APIError('{"code":50010000,"message":"boom"}')
+        client = self.make_client(held=[], cancel_error=failing)
+        remaining = execution.cancel_orphaned_protective_stops(client, self.ORPHANS[:1])
+        self.assertEqual([item["symbol"] for item in remaining], ["INTC"])
+
+
 class FlattenIntradayTests(unittest.TestCase):
     def setUp(self):
         from datetime import datetime, timedelta, timezone
