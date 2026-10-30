@@ -1,3 +1,4 @@
+import json
 from collections import defaultdict, deque
 from datetime import datetime, timezone
 
@@ -178,6 +179,8 @@ def build_realized_trade_report(fills: list[dict]) -> dict:
                 ),
                 "entry_order_type": entry_fill.get("order_type"),
                 "exit_order_type": fill.get("order_type"),
+                "entry_strategy_config": entry_fill.get("strategy_config"),
+                "exit_strategy_config": fill.get("strategy_config"),
                 "entry_reference_price": entry_reference,
                 "exit_reference_price": exit_reference,
                 "entry_fill_price": entry_price,
@@ -213,6 +216,18 @@ def build_realized_trade_report(fills: list[dict]) -> dict:
     summary_by_exit_order_type = _grouped_summary(
         trades, lambda trade: trade["exit_order_type"] or "unknown",
     )
+    summary_by_entry_config = _grouped_summary(
+        trades,
+        lambda trade: (
+            json.dumps({
+                key: trade["entry_strategy_config"].get(key)
+                for key in ("app_version", "strategy", "signal_fast_bars",
+                            "signal_slow_bars", "signal_min_spread_pct",
+                            "signal_min_buy_rsi")
+            }, sort_keys=True)
+            if trade["entry_strategy_config"] is not None else "unknown"
+        ),
+    )
     summary_by_strategy_symbol_order_type = _grouped_summary(
         trades,
         lambda trade: (
@@ -242,6 +257,7 @@ def build_realized_trade_report(fills: list[dict]) -> dict:
         "summary_by_symbol": summary_by_symbol,
         "summary_by_entry_order_type": summary_by_entry_order_type,
         "summary_by_exit_order_type": summary_by_exit_order_type,
+        "summary_by_entry_config": summary_by_entry_config,
         "summary_by_strategy_symbol_order_type": summary_by_strategy_symbol_order_type,
         "fees_complete": bool(trades) and all(trade["fees"] is not None for trade in trades),
         "open_managed_quantities": open_positions,
@@ -255,6 +271,26 @@ def build_realized_trade_report(fills: list[dict]) -> dict:
                 trade["entry_order_type"] is None or trade["exit_order_type"] is None
                 for trade in trades),
             "slices_missing_fees": sum(trade["fees"] is None for trade in trades),
+            "slices_missing_entry_strategy_config": sum(
+                trade["entry_strategy_config"] is None for trade in trades),
+            "slices_missing_exit_strategy_config": sum(
+                trade["exit_strategy_config"] is None for trade in trades),
+            "slices_missing_entry_signal_values": sum(
+                not trade["entry_strategy_config"]
+                or not trade["entry_strategy_config"].get("signal_values")
+                for trade in trades),
+        },
+        "fee_data": {
+            "trade_slices": len(trades),
+            "slices_with_complete_entry_and_exit_fees": sum(
+                trade["fees"] is not None for trade in trades),
+            "slices_missing_one_or_both_order_fees": sum(
+                trade["fees"] is None for trade in trades),
+            "allocation": (
+                "Explicit per-order fees from broker order data or fee fields on fill activities "
+                "are allocated FIFO by matched quantity. No fees are inferred from account cash "
+                "adjustments or regulatory-fee schedules."
+            ),
         },
     }
 

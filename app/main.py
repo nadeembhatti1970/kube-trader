@@ -9,7 +9,7 @@ from app.database import (connect, extended_hours_report, get_risk_state, latest
                           broker_activity_summary, broker_activity_sync_status, recent_closes)
 from app.export_names import export_filename
 from app.research import evaluate_walk_forward
-from app.settings import get_settings
+from app.settings import get_settings, strategy_config
 from app.storage import store_bars
 from app.trade_accounting import build_realized_trade_report, reconcile_open_quantities
 
@@ -136,12 +136,20 @@ def research_backtest(
         daily_closes = [float(row["close"]) for row in daily_rows]
         return {
             "symbol": ticker,
+            "app_version": settings.app_version,
             "cost_bps_per_side": costs,
             "train_fraction": split,
+            "intraday_buy_confirmation_filter": {
+                "min_spread_pct": settings.signal_min_spread_pct,
+                "min_rsi_14": settings.signal_min_buy_rsi,
+            },
             "intraday_data_bars": len(minute_closes),
             "daily_data_bars": len(daily_closes),
             "strategies": {
-                "intraday": evaluate_walk_forward(minute_closes, "intraday", costs, split),
+                "intraday": evaluate_walk_forward(
+                    minute_closes, "intraday", costs, split,
+                    settings.signal_min_spread_pct, settings.signal_min_buy_rsi,
+                ),
                 "swing": evaluate_walk_forward(daily_closes, "swing", costs, split),
                 "core": evaluate_walk_forward(daily_closes, "core", costs, split),
             },
@@ -233,6 +241,17 @@ def extended_hours_liquidity(days: int = Query(default=7, ge=1, le=30)):
 def trade_report(limit: int = Query(default=100, ge=1, le=1000)):
     try:
         report = build_realized_trade_report(managed_fills())
+        report["report_metadata"] = {
+            "generated_at": datetime.now(timezone.utc).isoformat(),
+            "app_version": settings.app_version,
+            "trading_mode": "paper" if settings.alpaca_paper else "live",
+            "current_strategy_config": strategy_config(settings),
+            "note": (
+                "The current configuration applies to new orders only. Each trade also includes "
+                "the configuration recorded with its entry and exit orders; null means that "
+                "historical order predates configuration attribution."
+            ),
+        }
         all_trades = report["trades"]
         report["total_closed_trade_slices"] = len(all_trades)
         report["trades"] = all_trades[-limit:]

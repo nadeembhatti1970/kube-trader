@@ -100,6 +100,12 @@ class RealizedTradeReportTests(unittest.TestCase):
                 "filled_at": start + timedelta(seconds=1),
                 "order_type": "market",
                 "fees": 0.10,
+                "strategy_config": {
+                    "app_version": "0.1.24",
+                    "signal_min_spread_pct": 0.001,
+                    "signal_min_buy_rsi": 55,
+                    "signal_values": {"fast_sma": 101, "slow_sma": 100, "rsi_14": 61},
+                },
             },
             {
                 "client_order_id": "exit",
@@ -117,6 +123,11 @@ class RealizedTradeReportTests(unittest.TestCase):
                 "filled_at": start + timedelta(minutes=1, seconds=2),
                 "order_type": "stop",
                 "fees": 0.20,
+                "strategy_config": {
+                    "app_version": "0.1.24",
+                    "signal_min_spread_pct": 0.001,
+                    "signal_min_buy_rsi": 55,
+                },
             },
         ]
 
@@ -125,11 +136,20 @@ class RealizedTradeReportTests(unittest.TestCase):
 
         self.assertEqual(trade["entry_order_type"], "market")
         self.assertEqual(trade["exit_order_type"], "stop")
+        self.assertEqual(trade["entry_strategy_config"]["app_version"], "0.1.24")
+        self.assertEqual(
+            trade["entry_strategy_config"]["signal_values"]["rsi_14"], 61,
+        )
+        self.assertEqual(trade["exit_strategy_config"]["app_version"], "0.1.24")
         self.assertEqual(trade["entry_reference_timestamp"], start)
         self.assertAlmostEqual(trade["entry_signal_to_fill_seconds"], 1)
         self.assertAlmostEqual(trade["fees"], 0.30)
         self.assertAlmostEqual(trade["net_realized_pnl"], 19.70)
         self.assertTrue(report["fees_complete"])
+        self.assertEqual(
+            report["fee_data"]["slices_with_complete_entry_and_exit_fees"], 1,
+        )
+        self.assertEqual(report["data_quality"]["slices_missing_entry_strategy_config"], 0)
         self.assertAlmostEqual(
             report["summary_by_strategy"]["swing"]["net_realized_pnl"], 19.70,
         )
@@ -138,6 +158,9 @@ class RealizedTradeReportTests(unittest.TestCase):
             ["swing|AAPL|market|stop"]["gross_realized_pnl"],
             20,
         )
+        self.assertEqual(len(report["summary_by_entry_config"]), 1)
+        cohort = next(iter(report["summary_by_entry_config"].values()))
+        self.assertEqual(cohort["gross_realized_pnl"], 20)
 
     def test_reports_sell_fills_without_a_managed_entry_as_unmatched(self):
         report = build_realized_trade_report([{

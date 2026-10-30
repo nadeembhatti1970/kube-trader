@@ -46,7 +46,8 @@ def init_db():
               parent_broker_order_id TEXT, signal_timestamp TIMESTAMPTZ,
               reference_price DOUBLE PRECISION, submitted_at TIMESTAMPTZ, filled_at TIMESTAMPTZ,
               filled_qty DOUBLE PRECISION, filled_avg_price DOUBLE PRECISION,
-              reference_timestamp TIMESTAMPTZ, order_type TEXT, fees DOUBLE PRECISION
+              reference_timestamp TIMESTAMPTZ, order_type TEXT, fees DOUBLE PRECISION,
+              strategy_config JSONB
             );
             ALTER TABLE orders ADD COLUMN IF NOT EXISTS stop_loss_pct DOUBLE PRECISION;
             ALTER TABLE orders ADD COLUMN IF NOT EXISTS parent_broker_order_id TEXT;
@@ -59,6 +60,7 @@ def init_db():
             ALTER TABLE orders ADD COLUMN IF NOT EXISTS reference_timestamp TIMESTAMPTZ;
             ALTER TABLE orders ADD COLUMN IF NOT EXISTS order_type TEXT;
             ALTER TABLE orders ADD COLUMN IF NOT EXISTS fees DOUBLE PRECISION;
+            ALTER TABLE orders ADD COLUMN IF NOT EXISTS strategy_config JSONB;
             CREATE TABLE IF NOT EXISTS broker_order_types (
               broker_order_id TEXT PRIMARY KEY, order_type TEXT NOT NULL,
               fetched_at TIMESTAMPTZ NOT NULL DEFAULT now()
@@ -81,8 +83,10 @@ def init_db():
               activity_id TEXT PRIMARY KEY, activity_type TEXT NOT NULL,
               activity_at TIMESTAMPTZ, order_id TEXT, symbol TEXT, side TEXT,
               qty DOUBLE PRECISION, price DOUBLE PRECISION, net_amount DOUBLE PRECISION,
+              fees DOUBLE PRECISION,
               raw JSONB NOT NULL
             );
+            ALTER TABLE broker_activities ADD COLUMN IF NOT EXISTS fees DOUBLE PRECISION;
             CREATE INDEX IF NOT EXISTS broker_activities_type_time
               ON broker_activities(activity_type, activity_at DESC);
             CREATE INDEX IF NOT EXISTS broker_activities_order
@@ -174,16 +178,17 @@ def save_backtest(symbol: str, metrics: dict):
 
 def reserve_order(client_order_id: str, signal_id: str, symbol: str, qty: float,
                   pool: str, stop_loss_pct: float, signal_timestamp: datetime,
-                  reference_price: float) -> bool:
+                  reference_price: float, strategy_config: dict | None = None) -> bool:
     with connect() as db:
         result = db.execute("""
           INSERT INTO orders(client_order_id, signal_id, symbol, side, qty, pool, status,
                              stop_loss_pct, signal_timestamp, reference_price,
-                             reference_timestamp, order_type)
-          VALUES (%s, %s, %s, 'buy', %s, %s, 'pending', %s, %s, %s, %s, 'market')
+                             reference_timestamp, order_type, strategy_config)
+          VALUES (%s, %s, %s, 'buy', %s, %s, 'pending', %s, %s, %s, %s, 'market', %s::jsonb)
           ON CONFLICT(client_order_id) DO NOTHING
         """, (client_order_id, signal_id, symbol, qty, pool, stop_loss_pct,
-              signal_timestamp, reference_price, signal_timestamp))
+              signal_timestamp, reference_price, signal_timestamp,
+              json.dumps(strategy_config) if strategy_config is not None else None))
         return result.rowcount == 1
 
 
@@ -207,17 +212,26 @@ def update_order(client_order_id: str, broker_id: str | None, status: str,
 def sync_managed_orders(orders: list[dict]):
     if not orders:
         return
+    records = [
+        {
+            **order,
+            "strategy_config": (json.dumps(order["strategy_config"])
+                                if order.get("strategy_config") is not None else None),
+        }
+        for order in orders
+    ]
     with connect() as db:
         db.cursor().executemany("""
           INSERT INTO orders(client_order_id, signal_id, symbol, side, qty, pool, broker_order_id,
                              status, parent_broker_order_id, signal_timestamp, reference_price,
                              submitted_at, filled_at, filled_qty, filled_avg_price,
-                             reference_timestamp, order_type, fees)
+                             reference_timestamp, order_type, fees, strategy_config)
           VALUES (%(client_order_id)s, %(signal_id)s, %(symbol)s, %(side)s, %(qty)s, %(pool)s,
                   %(broker_order_id)s, %(status)s, %(parent_broker_order_id)s,
                   %(signal_timestamp)s, %(reference_price)s, %(submitted_at)s,
                   %(filled_at)s, %(filled_qty)s, %(filled_avg_price)s,
-                  %(reference_timestamp)s, %(order_type)s, %(fees)s)
+                  %(reference_timestamp)s, %(order_type)s, %(fees)s,
+                  %(strategy_config)s::jsonb)
           ON CONFLICT(client_order_id) DO UPDATE SET
             broker_order_id=excluded.broker_order_id, status=excluded.status,
             parent_broker_order_id=COALESCE(excluded.parent_broker_order_id,
@@ -231,15 +245,16 @@ def sync_managed_orders(orders: list[dict]):
             reference_timestamp=COALESCE(excluded.reference_timestamp,
                                          orders.reference_timestamp),
             order_type=COALESCE(excluded.order_type, orders.order_type),
-            fees=COALESCE(excluded.fees, orders.fees)
-        """, orders)
+            fees=COALESCE(excluded.fees, orders.fees),
+            strategy_config=COALESCE(excluded.strategy_config, orders.strategy_config)
+        """, records)
 
 
 def managed_order_roots(limit: int = 5000) -> list[dict]:
     with connect() as db:
         return db.execute("""
           SELECT client_order_id, broker_order_id, signal_id, symbol, pool, status,
-                 signal_timestamp, reference_price, reference_timestamp
+                 signal_timestamp, reference_price, reference_timestamp, strategy_config
           FROM orders
           WHERE parent_broker_order_id IS NULL
           ORDER BY created_at DESC LIMIT %s
@@ -303,7 +318,8 @@ def managed_fills() -> list[dict]:
             SELECT a.order_id, a.symbol,
                    CASE WHEN a.side LIKE 'buy%%' THEN 'buy' ELSE 'sell' END AS side,
                    SUM(a.qty) AS qty, MAX(a.activity_at) AS filled_at,
-                   SUM(a.qty * a.price) / SUM(a.qty) AS avg_price
+                   SUM(a.qty * a.price) / SUM(a.qty) AS avg_price,
+                   CASE WHEN COUNT(a.fees) = COUNT(*) THEN SUM(a.fees) END AS fees
             FROM broker_activities a
             WHERE a.activity_type = 'FILL' AND a.order_id IS NOT NULL AND a.qty > 0
               AND a.price IS NOT NULL AND a.symbol IS NOT NULL
@@ -315,7 +331,8 @@ def managed_fills() -> list[dict]:
                    COALESCE(o.pool, sp.pool, 'unattributed') AS pool, f.qty,
                    o.signal_timestamp, o.reference_price, o.submitted_at, f.filled_at,
                    f.qty AS filled_qty, f.avg_price AS filled_avg_price,
-                   o.reference_timestamp, COALESCE(o.order_type, t.order_type) AS order_type, o.fees
+                   o.reference_timestamp, COALESCE(o.order_type, t.order_type) AS order_type,
+                   COALESCE(o.fees, f.fees) AS fees, o.strategy_config
             FROM activity_fills f
             LEFT JOIN orders o ON o.broker_order_id = f.order_id
             LEFT JOIN broker_order_types t ON t.broker_order_id = f.order_id
@@ -330,7 +347,8 @@ def managed_fills() -> list[dict]:
           ), recorded AS (
             SELECT client_order_id, broker_order_id, signal_id, symbol, side, pool, qty,
                    signal_timestamp, reference_price, submitted_at, filled_at,
-                   filled_qty, filled_avg_price, reference_timestamp, order_type, fees
+                   filled_qty, filled_avg_price, reference_timestamp, order_type, fees,
+                   strategy_config
             FROM orders
             WHERE filled_qty > 0 AND filled_avg_price IS NOT NULL
               AND side IN ('buy', 'sell')
@@ -391,6 +409,9 @@ def save_broker_activities(activities: list[dict]):
     rows = []
     for activity in activities:
         activity_at = activity.get("transaction_time") or activity.get("date")
+        fee_value = activity.get("fees")
+        if fee_value is None:
+            fee_value = activity.get("fee")
         rows.append({
             "activity_id": activity["id"],
             "activity_type": activity["activity_type"],
@@ -401,21 +422,23 @@ def save_broker_activities(activities: list[dict]):
             "qty": activity.get("qty"),
             "price": activity.get("price"),
             "net_amount": activity.get("net_amount"),
+            "fees": float(fee_value) if fee_value is not None else None,
             "raw": json.dumps(activity),
         })
     with connect() as db:
         db.cursor().executemany("""
           INSERT INTO broker_activities(
             activity_id, activity_type, activity_at, order_id, symbol, side,
-            qty, price, net_amount, raw
+            qty, price, net_amount, fees, raw
           ) VALUES (
             %(activity_id)s, %(activity_type)s, %(activity_at)s, %(order_id)s,
-            %(symbol)s, %(side)s, %(qty)s, %(price)s, %(net_amount)s, %(raw)s
+            %(symbol)s, %(side)s, %(qty)s, %(price)s, %(net_amount)s, %(fees)s, %(raw)s
           )
           ON CONFLICT(activity_id) DO UPDATE SET
             activity_type=excluded.activity_type, activity_at=excluded.activity_at,
             order_id=excluded.order_id, symbol=excluded.symbol, side=excluded.side,
             qty=excluded.qty, price=excluded.price, net_amount=excluded.net_amount,
+            fees=excluded.fees,
             raw=excluded.raw
         """, rows)
 
@@ -452,7 +475,8 @@ def broker_activity_summary() -> list[dict]:
     with connect() as db:
         return db.execute("""
           SELECT activity_type, COUNT(*) AS count, MAX(activity_at) AS latest_activity_at,
-                 SUM(net_amount) AS net_amount_total
+                 SUM(net_amount) AS net_amount_total, SUM(fees) AS explicit_fees_total,
+                 COUNT(fees) AS activities_with_fees
           FROM broker_activities
           GROUP BY activity_type ORDER BY activity_type
         """).fetchall()
@@ -462,7 +486,7 @@ def latest_broker_activities(limit: int = 500) -> list[dict]:
     with connect() as db:
         return db.execute("""
           SELECT activity_id, activity_type, activity_at, order_id, symbol, side,
-                 qty, price, net_amount, raw
+                 qty, price, net_amount, fees, raw
           FROM broker_activities
           ORDER BY activity_at DESC NULLS LAST, activity_id DESC
           LIMIT %s

@@ -26,7 +26,7 @@ from app.database import (broker_activity_sync_status, fill_order_ids_missing_ty
                           save_broker_activities, save_risk_state, sync_managed_orders,
                           update_broker_activity_sync, update_latest_account_orders,
                           update_order)
-from app.settings import get_settings
+from app.settings import get_settings, strategy_config
 from app.streams import SIGNAL_STREAM, client, ensure_group, read_group
 from app.trade_accounting import (build_realized_trade_report, reconcile_open_quantities,
                                  minutes_to_close, symbol_entry_block)
@@ -208,6 +208,7 @@ def refresh_tracked_order_statuses(client_api: TradingClient, open_orders=None):
         signal_timestamp = metadata.get("signal_timestamp") if is_root else None
         reference_price = metadata.get("reference_price") if is_root else None
         reference_timestamp = metadata.get("reference_timestamp") if is_root else None
+        order_strategy_config = metadata.get("strategy_config")
         filled_qty = getattr(order, "filled_qty", None)
         filled_avg_price = getattr(order, "filled_avg_price", None)
         fees = getattr(order, "fees", None)
@@ -224,6 +225,7 @@ def refresh_tracked_order_statuses(client_api: TradingClient, open_orders=None):
             "signal_timestamp": signal_timestamp,
             "reference_price": reference_price,
             "reference_timestamp": reference_timestamp,
+            "strategy_config": order_strategy_config,
             "submitted_at": getattr(order, "submitted_at", None),
             "filled_at": getattr(order, "filled_at", None),
             "filled_qty": float(filled_qty) if filled_qty is not None else None,
@@ -356,6 +358,7 @@ def close_managed_position(client_api: TradingClient, symbol: str, pool: str,
         "reference_price": (float(event["price"])
                             if event.get("price") is not None else None),
         "reference_timestamp": datetime.fromisoformat(event["ts"].replace("Z", "+00:00")),
+        "strategy_config": strategy_config(settings, event),
         "submitted_at": getattr(close_order, "submitted_at", None),
         "filled_at": getattr(close_order, "filled_at", None),
         "filled_qty": (float(close_order.filled_qty)
@@ -633,8 +636,27 @@ def place_entry(client_api: TradingClient, event: dict, signal_id: str,
 
     client_order_id = "kt-" + hashlib.sha256(f"{symbol}:{pool}:{signal_id}".encode()).hexdigest()[:28]
     signal_timestamp = datetime.fromisoformat(event["ts"].replace("Z", "+00:00"))
+    stop_price = max(round(price * (1 - stop_loss_pct), 2), 0.01)
+    take_profit_pct = None
+    take_profit_price = None
+    if pool == "intraday":
+        take_profit_pct = max(
+            float(event.get("take_profit_pct", settings.take_profit_pct)),
+            stop_loss_pct * 2,
+        )
+        take_profit_price = max(
+            round(price * (1 + take_profit_pct), 2), stop_price + 0.01,
+        )
+    run_config = strategy_config(settings, event)
+    run_config.update({
+        "effective_stop_loss_pct": stop_loss_pct,
+        "submitted_stop_price": stop_price,
+    })
+    if take_profit_pct is not None:
+        run_config["effective_take_profit_pct"] = take_profit_pct
+        run_config["submitted_take_profit_price"] = take_profit_price
     if not reserve_order(client_order_id, signal_id, symbol, qty, pool, stop_loss_pct,
-                         signal_timestamp, price):
+                         signal_timestamp, price, run_config):
         try:
             existing = client_api.get_order_by_client_id(client_order_id)
             status = str(getattr(existing.status, "value", existing.status)).lower()
@@ -666,12 +688,8 @@ def place_entry(client_api: TradingClient, event: dict, signal_id: str,
                 client_order_id, symbol, pool,
             )
         return
-    stop_price = max(round(price * (1 - stop_loss_pct), 2), 0.01)
     try:
         if pool == "intraday":
-            take_profit_pct = max(float(event.get("take_profit_pct", settings.take_profit_pct)),
-                                  stop_loss_pct * 2)
-            take_profit_price = max(round(price * (1 + take_profit_pct), 2), stop_price + 0.01)
             request = MarketOrderRequest(
                 symbol=symbol, qty=qty, side=OrderSide.BUY, type=OrderType.MARKET,
                 time_in_force=TimeInForce.DAY, order_class=OrderClass.BRACKET,

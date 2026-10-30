@@ -1,5 +1,7 @@
 from math import sqrt
 
+from app.services.signals import rsi
+
 
 STRATEGIES = {
     "intraday": {"fast": 5, "slow": 20, "periods_per_year": 390 * 252,
@@ -20,6 +22,28 @@ def position_at(closes: list[float], index: int, strategy: str) -> bool | None:
         return closes[index] > sum(closes[index - slow + 1:index + 1]) / slow
     return (sum(closes[index - fast + 1:index + 1]) / fast
             > sum(closes[index - slow + 1:index + 1]) / slow)
+
+
+def positions_for(closes: list[float], strategy: str, min_spread_pct: float = 0.0,
+                  min_buy_rsi: float = 0.0) -> list[bool | None]:
+    positions = []
+    previous = False
+    for index in range(len(closes)):
+        position = position_at(closes, index, strategy)
+        if position is None:
+            positions.append(None)
+            continue
+        if strategy == "intraday" and position and not previous:
+            config = STRATEGIES[strategy]
+            fast = sum(closes[index - config["fast"] + 1:index + 1]) / config["fast"]
+            slow = sum(closes[index - config["slow"] + 1:index + 1]) / config["slow"]
+            window = closes[max(0, index - config["slow"] + 1):index + 1]
+            spread = (fast - slow) / slow if slow else 0.0
+            if spread < min_spread_pct or rsi(window) < min_buy_rsi:
+                position = False
+        positions.append(position)
+        previous = position
+    return positions
 
 
 def summarize(returns: list[float], benchmark_returns: list[float], trades: int,
@@ -53,7 +77,8 @@ def _compound(returns: list[float]) -> float:
 
 
 def evaluate_walk_forward(closes: list[float], strategy: str, cost_bps: float,
-                          train_fraction: float) -> dict:
+                          train_fraction: float, min_spread_pct: float = 0.0,
+                          min_buy_rsi: float = 0.0) -> dict:
     """Evaluate close-based long-only rules with an in-sample/OOS chronological split."""
     if strategy not in STRATEGIES:
         raise ValueError(f"Unknown strategy: {strategy}")
@@ -62,10 +87,14 @@ def evaluate_walk_forward(closes: list[float], strategy: str, cost_bps: float,
                 "required_bars": STRATEGIES[strategy]["slow"] + 2}
     if not 0 <= cost_bps <= 100:
         raise ValueError("cost_bps must be between 0 and 100")
+    if min_spread_pct < 0:
+        raise ValueError("min_spread_pct cannot be negative")
+    if not 0 <= min_buy_rsi <= 100:
+        raise ValueError("min_buy_rsi must be between 0 and 100")
     if not 0.5 <= train_fraction <= 0.9:
         raise ValueError("train_fraction must be between 0.5 and 0.9")
 
-    positions = [position_at(closes, index, strategy) for index in range(len(closes))]
+    positions = positions_for(closes, strategy, min_spread_pct, min_buy_rsi)
     split = int(len(closes) * train_fraction)
     cost_rate = cost_bps / 10_000
     in_sample, out_of_sample = [], []
@@ -95,6 +124,10 @@ def evaluate_walk_forward(closes: list[float], strategy: str, cost_bps: float,
         "bars": len(closes), "frequency": STRATEGIES[strategy]["frequency"],
         "warmup_bars": STRATEGIES[strategy]["slow"],
         "cost_bps_per_side": cost_bps, "train_fraction": train_fraction,
+        "buy_confirmation_filter": (
+            {"min_spread_pct": min_spread_pct, "min_rsi_14": min_buy_rsi}
+            if strategy == "intraday" else None
+        ),
         "in_sample": summarize(in_sample, in_benchmark, in_trades, periods),
         "out_of_sample": summarize(out_of_sample, out_benchmark, out_trades, periods),
         "limitations": [

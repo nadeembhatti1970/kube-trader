@@ -64,3 +64,33 @@ class Settings(BaseSettings):
 @lru_cache
 def get_settings() -> Settings:
     return Settings()
+
+
+def strategy_config(settings: Settings | None = None, event: dict | None = None) -> dict:
+    current = settings or get_settings()
+    result = {
+        "app_version": current.app_version,
+        "trading_mode": "paper" if current.alpaca_paper else "live",
+        "strategy": "sma-crossover-confirmed-v1",
+        "signal_fast_bars": current.signal_fast_bars,
+        "signal_slow_bars": current.signal_slow_bars,
+        "signal_min_spread_pct": current.signal_min_spread_pct,
+        "signal_min_buy_rsi": current.signal_min_buy_rsi,
+        "stop_loss_pct": current.stop_loss_pct,
+        "take_profit_pct": current.take_profit_pct,
+        "swing_atr_period": current.swing_atr_period,
+        "swing_atr_multiple": current.swing_atr_multiple,
+        "core_stop_loss_pct": current.core_stop_loss_pct,
+        "intraday_flatten_minutes": current.intraday_flatten_minutes,
+        "intraday_entry_cutoff_minutes": current.intraday_entry_cutoff_minutes,
+    }
+    if event:
+        signal_values = {
+            key: event[key]
+            for key in ("fast_sma", "slow_sma", "rsi_14", "daily_trend",
+                        "strategy_bar_date", "stop_loss_pct", "take_profit_pct")
+            if event.get(key) is not None
+        }
+        if signal_values:
+            result["signal_values"] = signal_values
+    return result
