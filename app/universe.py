@@ -24,6 +24,8 @@ DEFAULT_SECTORS = {
     "PLD": "real_estate", "SPY": "broad_market", "QQQ": "broad_market",
     "IWM": "broad_market", "DIA": "broad_market", "GLD": "commodities",
     "TLT": "fixed_income",
+    "AMAT": "technology", "PANW": "technology", "GOOG": "communication_services",
+    "GS": "financials", "BRK.B": "financials",
 }
 
 
