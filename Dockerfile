@@ -1,4 +1,4 @@
-FROM python:3.12-slim
+FROM python:3.15-slim
 ARG APP_VERSION=dev
 LABEL org.opencontainers.image.source="https://github.com/nadeembhatti1970/kube-trader"
 ENV APP_VERSION=$APP_VERSION PYTHONDONTWRITEBYTECODE=1 PYTHONUNBUFFERED=1 PIP_NO_CACHE_DIR=1
