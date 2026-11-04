@@ -74,6 +74,10 @@ class RealizedTradeReportTests(unittest.TestCase):
         }])
         self.assertEqual(report["summary_by_pool"]["intraday"]["gross_realized_pnl"], 38.0)
         self.assertEqual(report["summary_by_pool"]["intraday"]["win_rate_pct"], 100.0)
+        self.assertEqual(
+            report["summary_by_entry_version"]["unknown"]["closed_trade_slices"], 2,
+        )
+        self.assertEqual(report["data_quality"]["slices_with_entry_strategy_config"], 0)
         self.assertFalse(report["fees_complete"])
         self.assertIsNone(report["summary_by_pool"]["intraday"]["net_realized_pnl"])
         self.assertAlmostEqual(
@@ -159,6 +163,7 @@ class RealizedTradeReportTests(unittest.TestCase):
             20,
         )
         self.assertEqual(len(report["summary_by_entry_config"]), 1)
+        self.assertEqual(report["summary_by_entry_version"]["0.1.24"]["closed_trade_slices"], 1)
         cohort = next(iter(report["summary_by_entry_config"].values()))
         self.assertEqual(cohort["gross_realized_pnl"], 20)
 

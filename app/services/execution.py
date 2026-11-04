@@ -651,6 +651,14 @@ def place_entry(client_api: TradingClient, event: dict, signal_id: str,
     run_config.update({
         "effective_stop_loss_pct": stop_loss_pct,
         "submitted_stop_price": stop_price,
+        "order_sizing": {
+            "equity_at_entry": equity,
+            "pool_available_before_order": available,
+            "risk_budget": risk_budget,
+            "quantity": qty,
+            "notional_at_reference_price": qty * price,
+            "risk_at_submitted_stop": qty * max(price - stop_price, 0.0),
+        },
     })
     if take_profit_pct is not None:
         run_config["effective_take_profit_pct"] = take_profit_pct

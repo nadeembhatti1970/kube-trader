@@ -2,6 +2,7 @@ import unittest
 from unittest.mock import patch
 
 from app import main
+from app.settings import Settings, strategy_config
 
 
 class TradeReportMetadataTests(unittest.TestCase):
@@ -21,6 +22,28 @@ class TradeReportMetadataTests(unittest.TestCase):
             main.settings.signal_min_spread_pct,
         )
         self.assertIn("new orders only", metadata["note"])
+
+    def test_strategy_provenance_records_effective_risk_controls(self):
+        configured = Settings(
+            _env_file=None,
+            app_version="0.1.25",
+            max_trade_risk_pct=0.02,
+            symbol_loss_cooldown_seconds=1800,
+            symbol_daily_loss_limit=50,
+        )
+
+        provenance = strategy_config(configured)
+
+        self.assertEqual(
+            provenance["risk_controls"]["configured_max_trade_risk_pct"], 0.02,
+        )
+        self.assertEqual(
+            provenance["risk_controls"]["effective_max_trade_risk_pct"], 0.01,
+        )
+        self.assertEqual(
+            provenance["risk_controls"]["symbol_loss_cooldown_seconds"], 1800,
+        )
+        self.assertEqual(provenance["risk_controls"]["symbol_daily_loss_limit"], 50)
 
 
 if __name__ == "__main__":

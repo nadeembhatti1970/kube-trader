@@ -6,9 +6,9 @@ from pydantic import BaseModel
 from app.market_data import get_daily_bars
 from app.database import (connect, extended_hours_report, get_risk_state, latest_account_snapshot, latest_backtest,
                           latest_broker_activities, latest_universe_snapshot, managed_fills,
-                          broker_activity_summary, broker_activity_sync_status, recent_closes)
+                          broker_activity_summary, broker_activity_sync_status, recent_bars)
 from app.export_names import export_filename
-from app.research import evaluate_walk_forward
+from app.research import evaluate_ohlc_walk_forward
 from app.settings import get_settings, strategy_config
 from app.storage import store_bars
 from app.trade_accounting import build_realized_trade_report, reconcile_open_quantities
@@ -130,28 +130,44 @@ def research_backtest(
     costs = settings.backtest_cost_bps if cost_bps is None else cost_bps
     split = settings.backtest_train_fraction if train_fraction is None else train_fraction
     try:
-        minute_rows = recent_closes(ticker, settings.intraday_backtest_bars)
+        minute_rows = recent_bars(ticker, settings.intraday_backtest_bars)
         daily_rows = get_daily_bars(ticker, days, settings)
-        minute_closes = [float(row["close"]) for row in minute_rows]
-        daily_closes = [float(row["close"]) for row in daily_rows]
+        model_config = {
+            "stop_loss_pct": settings.stop_loss_pct,
+            "take_profit_pct": settings.take_profit_pct,
+            "intraday_flatten_minutes": settings.intraday_flatten_minutes,
+            "intraday_entry_cutoff_minutes": settings.intraday_entry_cutoff_minutes,
+            "swing_atr_period": settings.swing_atr_period,
+            "swing_atr_multiple": settings.swing_atr_multiple,
+            "core_stop_loss_pct": settings.core_stop_loss_pct,
+        }
         return {
             "symbol": ticker,
             "app_version": settings.app_version,
+            "strategy_config": strategy_config(settings),
+            "backtest_model": "ohlc-next-open-v1",
             "cost_bps_per_side": costs,
             "train_fraction": split,
             "intraday_buy_confirmation_filter": {
                 "min_spread_pct": settings.signal_min_spread_pct,
                 "min_rsi_14": settings.signal_min_buy_rsi,
             },
-            "intraday_data_bars": len(minute_closes),
-            "daily_data_bars": len(daily_closes),
+            "intraday_data_bars": len(minute_rows),
+            "daily_data_bars": len(daily_rows),
             "strategies": {
-                "intraday": evaluate_walk_forward(
-                    minute_closes, "intraday", costs, split,
+                "intraday": evaluate_ohlc_walk_forward(
+                    minute_rows, "intraday", costs, split,
                     settings.signal_min_spread_pct, settings.signal_min_buy_rsi,
+                    fast_period=settings.signal_fast_bars,
+                    slow_period=settings.signal_slow_bars,
+                    **model_config,
                 ),
-                "swing": evaluate_walk_forward(daily_closes, "swing", costs, split),
-                "core": evaluate_walk_forward(daily_closes, "core", costs, split),
+                "swing": evaluate_ohlc_walk_forward(
+                    daily_rows, "swing", costs, split, **model_config,
+                ),
+                "core": evaluate_ohlc_walk_forward(
+                    daily_rows, "core", costs, split, **model_config,
+                ),
             },
         }
     except Exception as exc:
@@ -248,8 +264,8 @@ def trade_report(limit: int = Query(default=100, ge=1, le=1000)):
             "current_strategy_config": strategy_config(settings),
             "note": (
                 "The current configuration applies to new orders only. Each trade also includes "
-                "the configuration recorded with its entry and exit orders; null means that "
-                "historical order predates configuration attribution."
+                "the configuration recorded with its entry and exit orders; null means no "
+                "configuration was recorded and must not be inferred."
             ),
         }
         all_trades = report["trades"]

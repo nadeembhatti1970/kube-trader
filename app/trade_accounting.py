@@ -216,15 +216,28 @@ def build_realized_trade_report(fills: list[dict]) -> dict:
     summary_by_exit_order_type = _grouped_summary(
         trades, lambda trade: trade["exit_order_type"] or "unknown",
     )
+    config_keys = (
+        "app_version", "trading_mode", "strategy", "signal_fast_bars",
+        "signal_slow_bars", "signal_min_spread_pct", "signal_min_buy_rsi",
+        "stop_loss_pct", "take_profit_pct", "effective_stop_loss_pct",
+        "effective_take_profit_pct", "swing_atr_period", "swing_atr_multiple",
+        "core_stop_loss_pct", "intraday_flatten_minutes",
+        "intraday_entry_cutoff_minutes", "risk_controls",
+    )
     summary_by_entry_config = _grouped_summary(
         trades,
         lambda trade: (
             json.dumps({
                 key: trade["entry_strategy_config"].get(key)
-                for key in ("app_version", "strategy", "signal_fast_bars",
-                            "signal_slow_bars", "signal_min_spread_pct",
-                            "signal_min_buy_rsi")
+                for key in config_keys
             }, sort_keys=True)
+            if trade["entry_strategy_config"] is not None else "unknown"
+        ),
+    )
+    summary_by_entry_version = _grouped_summary(
+        trades,
+        lambda trade: (
+            str(trade["entry_strategy_config"].get("app_version") or "unknown")
             if trade["entry_strategy_config"] is not None else "unknown"
         ),
     )
@@ -258,11 +271,14 @@ def build_realized_trade_report(fills: list[dict]) -> dict:
         "summary_by_entry_order_type": summary_by_entry_order_type,
         "summary_by_exit_order_type": summary_by_exit_order_type,
         "summary_by_entry_config": summary_by_entry_config,
+        "summary_by_entry_version": summary_by_entry_version,
         "summary_by_strategy_symbol_order_type": summary_by_strategy_symbol_order_type,
         "fees_complete": bool(trades) and all(trade["fees"] is not None for trade in trades),
         "open_managed_quantities": open_positions,
         "unmatched_exit_fills": unmatched_exits,
         "data_quality": {
+            "slices_with_entry_strategy_config": sum(
+                trade["entry_strategy_config"] is not None for trade in trades),
             "slices_missing_entry_signal_timestamp": sum(
                 trade["entry_signal_timestamp"] is None for trade in trades),
             "slices_missing_exit_signal_timestamp": sum(

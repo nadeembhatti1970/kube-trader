@@ -31,8 +31,11 @@ def init_db():
             CREATE TABLE IF NOT EXISTS backtest_metrics (
               symbol TEXT PRIMARY KEY, as_of TIMESTAMPTZ NOT NULL,
               bars INTEGER NOT NULL, total_return DOUBLE PRECISION NOT NULL,
-              max_drawdown DOUBLE PRECISION NOT NULL, sharpe DOUBLE PRECISION NOT NULL
+              max_drawdown DOUBLE PRECISION NOT NULL, sharpe DOUBLE PRECISION NOT NULL,
+              model_config JSONB NOT NULL DEFAULT '{}'
             );
+            ALTER TABLE backtest_metrics ADD COLUMN IF NOT EXISTS model_config JSONB
+              NOT NULL DEFAULT '{}';
             CREATE TABLE IF NOT EXISTS risk_state (
               id BOOLEAN PRIMARY KEY DEFAULT TRUE CHECK (id), session_date DATE NOT NULL,
               starting_equity DOUBLE PRECISION NOT NULL, halted BOOLEAN NOT NULL DEFAULT FALSE,
@@ -132,6 +135,16 @@ def recent_closes(symbol: str, limit: int) -> list[dict]:
     return list(reversed(rows))
 
 
+def recent_bars(symbol: str, limit: int) -> list[dict]:
+    with connect() as db:
+        rows = db.execute(
+            "SELECT ts, open, high, low, close FROM bars "
+            "WHERE symbol=%s ORDER BY ts DESC LIMIT %s",
+            (symbol, limit),
+        ).fetchall()
+    return list(reversed(rows))
+
+
 def strategy_is_above(symbol: str) -> bool:
     with connect() as db:
         row = db.execute("SELECT above_sma FROM strategy_state WHERE symbol=%s", (symbol,)).fetchone()
@@ -164,16 +177,18 @@ def save_horizon_strategy_state(symbol: str, pool: str, above: bool, bar_date):
         """, (symbol, pool, above, bar_date))
 
 
-def save_backtest(symbol: str, metrics: dict):
+def save_backtest(symbol: str, metrics: dict, model_config: dict | None = None):
     with connect() as db:
         db.execute("""
-          INSERT INTO backtest_metrics(symbol, as_of, bars, total_return, max_drawdown, sharpe)
-          VALUES (%s, %s, %s, %s, %s, %s)
+          INSERT INTO backtest_metrics(symbol, as_of, bars, total_return, max_drawdown, sharpe,
+                                       model_config)
+          VALUES (%s, %s, %s, %s, %s, %s, %s::jsonb)
           ON CONFLICT(symbol) DO UPDATE SET as_of=excluded.as_of, bars=excluded.bars,
             total_return=excluded.total_return, max_drawdown=excluded.max_drawdown,
-            sharpe=excluded.sharpe
+            sharpe=excluded.sharpe, model_config=excluded.model_config
         """, (symbol, datetime.now(timezone.utc), metrics["bars"], metrics["total_return"],
-              metrics["max_drawdown"], metrics["sharpe"]))
+              metrics["max_drawdown"], metrics["sharpe"],
+              json.dumps(model_config or {})))
 
 
 def reserve_order(client_order_id: str, signal_id: str, symbol: str, qty: float,

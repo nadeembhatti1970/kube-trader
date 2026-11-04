@@ -2,9 +2,9 @@ import json
 import logging
 import uuid
 
-from app.database import init_db, recent_closes, save_backtest
-from app.services.signals import rsi
-from app.settings import get_settings
+from app.database import init_db, recent_bars, save_backtest
+from app.research import STRATEGIES, simulate_ohlc, summarize
+from app.settings import get_settings, strategy_config
 from app.streams import BAR_STREAM, client, ensure_group, read_group
 
 logging.basicConfig(level=logging.INFO)
@@ -12,37 +12,33 @@ log = logging.getLogger("backtesting")
 settings = get_settings()
 
 
-def evaluate(closes: list[float], fast_period: int, slow_period: int,
-             min_spread_pct: float = 0.0, min_buy_rsi: float = 0.0) -> dict | None:
-    """Replay the live crossover rule, including the buy confirmation filter."""
-    if len(closes) < slow_period + 1:
+def evaluate(bars: list[dict], fast_period: int, slow_period: int,
+             min_spread_pct: float = 0.0, min_buy_rsi: float = 0.0,
+             cost_bps: float = 5.0, stop_loss_pct: float = 0.02,
+             take_profit_pct: float = 0.04, intraday_flatten_minutes: int = 0,
+             intraday_entry_cutoff_minutes: int = 0) -> dict | None:
+    """Run the same OHLC execution model used by the research endpoint."""
+    if len(bars) < slow_period + 2:
         return None
-    equity, peak, max_drawdown = 1.0, 1.0, 0.0
-    returns = []
-    held = False
-    held_by_decision = {slow_period - 1: False}
-    for decision in range(slow_period, len(closes)):
-        window = closes[decision - slow_period - 1 if decision > slow_period else 0:decision]
-        fast = sum(closes[decision-fast_period:decision]) / fast_period
-        slow = sum(closes[decision-slow_period:decision]) / slow_period
-        above = fast > slow
-        if above and not held:
-            spread = (fast - slow) / slow if slow else 0.0
-            above = spread >= min_spread_pct and rsi(window) >= min_buy_rsi
-        held = above
-        held_by_decision[decision] = held
-    for index in range(slow_period, len(closes)):
-        previous_position = 1.0 if held_by_decision[index - 1] else 0.0
-        bar_return = (closes[index] / closes[index - 1] - 1.0) * previous_position
-        returns.append(bar_return)
-        equity *= 1.0 + bar_return
-        peak = max(peak, equity)
-        max_drawdown = min(max_drawdown, equity / peak - 1.0)
-    mean = sum(returns) / len(returns)
-    variance = sum((value - mean) ** 2 for value in returns) / max(1, len(returns) - 1)
-    stddev = variance ** 0.5
-    return {"bars": len(returns), "total_return": equity - 1,
-            "max_drawdown": max_drawdown, "sharpe": mean / stddev if stddev else 0.0}
+    simulation = simulate_ohlc(
+        bars, "intraday", cost_bps, min_spread_pct, min_buy_rsi,
+        stop_loss_pct, take_profit_pct, intraday_flatten_minutes,
+        intraday_entry_cutoff_minutes, fast_period=fast_period,
+        slow_period=slow_period,
+    )
+    periods = STRATEGIES["intraday"]["periods_per_year"]
+    metrics = summarize(
+        simulation["bar_returns"], simulation["benchmark_returns"],
+        len(simulation["trades"]), periods,
+    )
+    return {
+        "bars": len(bars),
+        "total_return": metrics["total_return"],
+        "max_drawdown": metrics["max_drawdown"],
+        "sharpe": metrics["sharpe_annualized"],
+        "closed_trades": len(simulation["trades"]),
+        "open_trade_at_end": simulation["open_trade"],
+    }
 
 
 def main():
@@ -57,13 +53,23 @@ def main():
             for message_id, fields in messages:
                 try:
                     event = json.loads(fields["data"])
-                    history = recent_closes(event["symbol"], 500)
-                    metrics = evaluate([float(row["close"]) for row in history],
+                    history = recent_bars(event["symbol"], 500)
+                    metrics = evaluate(history,
                                        settings.signal_fast_bars, settings.signal_slow_bars,
                                        settings.signal_min_spread_pct,
-                                       settings.signal_min_buy_rsi)
+                                       settings.signal_min_buy_rsi,
+                                       settings.backtest_cost_bps,
+                                       settings.stop_loss_pct,
+                                       settings.take_profit_pct,
+                                       settings.intraday_flatten_minutes,
+                                       settings.intraday_entry_cutoff_minutes)
                     if metrics:
-                        save_backtest(event["symbol"], metrics)
+                        model_config = strategy_config(settings)
+                        model_config.update({
+                            "backtest_model": "ohlc-next-open-v1",
+                            "backtest_cost_bps_per_side": settings.backtest_cost_bps,
+                        })
+                        save_backtest(event["symbol"], metrics, model_config)
                     redis_client.xack(BAR_STREAM, "backtest-workers", message_id)
                 except Exception:
                     log.exception("Unable to backtest event %s", message_id)
@@ -71,4 +77,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-

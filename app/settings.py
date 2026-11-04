@@ -83,6 +83,21 @@ def strategy_config(settings: Settings | None = None, event: dict | None = None)
         "core_stop_loss_pct": current.core_stop_loss_pct,
         "intraday_flatten_minutes": current.intraday_flatten_minutes,
         "intraday_entry_cutoff_minutes": current.intraday_entry_cutoff_minutes,
+        "risk_controls": {
+            "configured_max_trade_risk_pct": current.max_trade_risk_pct,
+            "effective_max_trade_risk_pct": min(current.max_trade_risk_pct, 0.01),
+            "daily_drawdown_limit_pct": current.daily_drawdown_limit_pct,
+            "symbol_loss_cooldown_seconds": current.symbol_loss_cooldown_seconds,
+            "symbol_daily_loss_limit": current.symbol_daily_loss_limit,
+            "max_open_positions": current.max_open_positions,
+            "max_symbol_exposure_pct": current.max_symbol_exposure_pct,
+            "max_sector_exposure_pct": current.max_sector_exposure_pct,
+            "intraday_allocation_pct": current.intraday_allocation_pct,
+            "swing_allocation_pct": current.swing_allocation_pct,
+            "core_allocation_pct": current.core_allocation_pct,
+            "stop_management_enabled": current.stop_management_enabled,
+            "execution_enabled": current.execution_enabled,
+        },
     }
     if event:
         signal_values = {
