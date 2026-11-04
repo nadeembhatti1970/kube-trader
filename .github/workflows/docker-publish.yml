@@ -14,7 +14,6 @@ on:
 
 permissions:
   contents: write
-  actions: write
 
 concurrency:
   group: docker-publish-${{ github.ref }}
@@ -91,8 +90,3 @@ jobs:
           git add helm/kube-trader/values.yaml helm/kube-trader/Chart.yaml
           git commit -m "chore(helm): publish image $IMAGE_TAG as chart $CHART_VERSION"
           git push
-
-      - name: Dispatch Helm chart publish
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: gh workflow run helm-publish.yml --ref main

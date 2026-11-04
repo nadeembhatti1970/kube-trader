@@ -7,6 +7,13 @@ on:
     paths:
       - "helm/kube-trader/**"
       - ".github/workflows/helm-publish.yml"
+  workflow_run:
+    workflows:
+      - Publish Docker image
+    types:
+      - completed
+    branches:
+      - main
   workflow_dispatch:
 
 permissions:
@@ -18,6 +25,7 @@ concurrency:
 
 jobs:
   publish:
+    if: github.event_name != 'workflow_run' || github.event.workflow_run.conclusion == 'success'
     runs-on: ubuntu-latest
     steps:
       - name: Check out source
