@@ -265,7 +265,9 @@ def trade_report(limit: int = Query(default=100, ge=1, le=1000)):
             "note": (
                 "The current configuration applies to new orders only. Each trade also includes "
                 "the configuration recorded with its entry and exit orders; null means no "
-                "configuration was recorded and must not be inferred."
+                "configuration was recorded and must not be inferred. Attribution fields identify "
+                "whether each fill came from the managed ledger, a recorded parent order, or only "
+                "a bot client-order ID."
             ),
         }
         all_trades = report["trades"]

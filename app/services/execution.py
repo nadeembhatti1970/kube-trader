@@ -751,13 +751,21 @@ def handle_signal(client_api: TradingClient, event: dict, signal_id: str, risk: 
     if not settings.execution_enabled:
         log.info("Execution disabled; signal observed: %s %s", event.get("symbol"), event.get("action"))
         return True
+    action = event.get("action")
+    if action not in {"buy", "sell"}:
+        log.warning("Ignoring unsupported signal action %r for %s",
+                    action, event.get("symbol"))
+        return True
+    if action == "buy" and not settings.new_entries_enabled:
+        log.info("New entries disabled; buy signal observed: %s", event.get("symbol"))
+        return True
     timestamp = datetime.fromisoformat(event["ts"].replace("Z", "+00:00"))
     age = (datetime.now(timezone.utc) - timestamp.astimezone(timezone.utc)).total_seconds()
     if age < -30 or age > settings.max_signal_age_seconds:
         log.warning("Ignoring stale/future signal for %s (age %.1fs)", event.get("symbol"), age)
         return True
     account, positions, risk, _ = reconcile(client_api)
-    if event.get("action") == "sell":
+    if action == "sell":
         assigned_pool = managed_pool_assignments().get(event["symbol"])
         event_pool = event.get("pool", "intraday")
         if assigned_pool != event_pool:

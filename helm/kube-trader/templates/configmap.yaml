@@ -9,6 +9,7 @@ data:
   ALPACA_DATA_FEED: {{ .Values.config.alpacaDataFeed | quote }}
   MARKET_STREAM_ENABLED: {{ .Values.config.marketStreamEnabled | quote }}
   EXECUTION_ENABLED: {{ .Values.config.executionEnabled | quote }}
+  NEW_ENTRIES_ENABLED: {{ .Values.config.newEntriesEnabled | quote }}
   STOP_MANAGEMENT_ENABLED: {{ .Values.config.stopManagementEnabled | quote }}
   REDIS_URL: redis://{{ include "kube-trader.fullname" . }}-redis:6379/0
   MAX_TRADE_RISK_PCT: {{ .Values.config.maxTradeRiskPct | quote }}

@@ -68,6 +68,13 @@ def init_db():
               broker_order_id TEXT PRIMARY KEY, order_type TEXT NOT NULL,
               fetched_at TIMESTAMPTZ NOT NULL DEFAULT now()
             );
+            CREATE TABLE IF NOT EXISTS broker_order_metadata (
+              broker_order_id TEXT PRIMARY KEY, client_order_id TEXT,
+              parent_broker_order_id TEXT, symbol TEXT, side TEXT, order_type TEXT,
+              captured_at TIMESTAMPTZ NOT NULL DEFAULT now()
+            );
+            CREATE INDEX IF NOT EXISTS broker_order_metadata_parent
+              ON broker_order_metadata(parent_broker_order_id);
             CREATE TABLE IF NOT EXISTS account_snapshots (
               captured_at TIMESTAMPTZ PRIMARY KEY, equity DOUBLE PRECISION NOT NULL,
               buying_power DOUBLE PRECISION NOT NULL, positions JSONB NOT NULL,
@@ -324,8 +331,8 @@ def managed_fills() -> list[dict]:
     """Bot-recorded order fills plus Alpaca FILL activities for orders the bot never recorded.
 
     Orders with no recorded fill data (bracket exit legs, orders placed outside the bot, or bot
-    orders whose fills were never stored) use Alpaca fills aggregated per order. They keep the
-    bot's pool, signal and order type when recorded, else the pool of the symbol's latest earlier order or "unattributed".
+    orders whose fills were never stored) use Alpaca fills aggregated per order. Pool attribution
+    comes only from a recorded order or its recorded parent; otherwise it remains unattributed.
     """
     with connect() as db:
         return db.execute("""
@@ -341,29 +348,39 @@ def managed_fills() -> list[dict]:
               AND a.side IN ('buy', 'sell', 'sell_short', 'buy_to_cover')
             GROUP BY a.order_id, a.symbol, 3
           ), broker_only AS (
-            SELECT COALESCE(o.client_order_id, 'broker-' || f.order_id) AS client_order_id,
-                   f.order_id AS broker_order_id, o.signal_id, f.symbol, f.side,
-                   COALESCE(o.pool, sp.pool, 'unattributed') AS pool, f.qty,
+            SELECT COALESCE(o.client_order_id, m.client_order_id,
+                            'broker-' || f.order_id) AS client_order_id,
+                   f.order_id AS broker_order_id,
+                   COALESCE(o.signal_id, parent_order.signal_id) AS signal_id,
+                   f.symbol, f.side,
+                   COALESCE(o.pool, parent_order.pool, 'unattributed') AS pool, f.qty,
                    o.signal_timestamp, o.reference_price, o.submitted_at, f.filled_at,
                    f.qty AS filled_qty, f.avg_price AS filled_avg_price,
-                   o.reference_timestamp, COALESCE(o.order_type, t.order_type) AS order_type,
-                   COALESCE(o.fees, f.fees) AS fees, o.strategy_config
+                   o.reference_timestamp,
+                   COALESCE(o.order_type, t.order_type, m.order_type) AS order_type,
+                   COALESCE(o.fees, f.fees) AS fees, o.strategy_config,
+                   CASE
+                     WHEN o.broker_order_id IS NOT NULL THEN 'managed_order_ledger'
+                     WHEN parent_order.broker_order_id IS NOT NULL THEN 'managed_parent_order'
+                     WHEN m.client_order_id LIKE 'kt-%' THEN 'bot_client_order_id'
+                     ELSE 'unattributed'
+                   END AS attribution_source,
+                   'broker_activity' AS fill_source
             FROM activity_fills f
             LEFT JOIN orders o ON o.broker_order_id = f.order_id
             LEFT JOIN broker_order_types t ON t.broker_order_id = f.order_id
-            LEFT JOIN LATERAL (
-              SELECT p.pool FROM orders p
-              WHERE p.symbol = f.symbol AND p.pool IS NOT NULL
-                AND p.created_at <= f.filled_at
-              ORDER BY p.created_at DESC LIMIT 1
-            ) sp ON TRUE
+            LEFT JOIN broker_order_metadata m ON m.broker_order_id = f.order_id
+            LEFT JOIN orders parent_order
+              ON parent_order.broker_order_id = m.parent_broker_order_id
+             AND parent_order.parent_broker_order_id IS NULL
             WHERE o.broker_order_id IS NULL
                OR NOT (COALESCE(o.filled_qty, 0) > 0 AND o.filled_avg_price IS NOT NULL)
           ), recorded AS (
             SELECT client_order_id, broker_order_id, signal_id, symbol, side, pool, qty,
                    signal_timestamp, reference_price, submitted_at, filled_at,
                    filled_qty, filled_avg_price, reference_timestamp, order_type, fees,
-                   strategy_config
+                   strategy_config, 'managed_order_ledger' AS attribution_source,
+                   'managed_order_ledger' AS fill_source
             FROM orders
             WHERE filled_qty > 0 AND filled_avg_price IS NOT NULL
               AND side IN ('buy', 'sell')
@@ -410,12 +427,55 @@ def save_account_snapshot(equity: float, buying_power: float, positions: list[di
 
 
 def update_latest_account_orders(orders: list[dict]):
+    records = _flatten_order_metadata(orders)
     with connect() as db:
         db.execute("""
           UPDATE account_snapshots SET orders=%s
           WHERE captured_at=(SELECT captured_at FROM account_snapshots
                              ORDER BY captured_at DESC LIMIT 1)
         """, (json.dumps(orders, default=str),))
+        if records:
+            db.cursor().executemany("""
+              INSERT INTO broker_order_metadata(
+                broker_order_id, client_order_id, parent_broker_order_id,
+                symbol, side, order_type, captured_at
+              ) VALUES (
+                %(broker_order_id)s, %(client_order_id)s, %(parent_broker_order_id)s,
+                %(symbol)s, %(side)s, %(order_type)s, now()
+              )
+              ON CONFLICT(broker_order_id) DO UPDATE SET
+                client_order_id=COALESCE(excluded.client_order_id,
+                                         broker_order_metadata.client_order_id),
+                parent_broker_order_id=COALESCE(excluded.parent_broker_order_id,
+                                                broker_order_metadata.parent_broker_order_id),
+                symbol=COALESCE(excluded.symbol, broker_order_metadata.symbol),
+                side=COALESCE(excluded.side, broker_order_metadata.side),
+                order_type=COALESCE(excluded.order_type, broker_order_metadata.order_type),
+                captured_at=now()
+            """, records)
+
+
+def _flatten_order_metadata(orders: list[dict]) -> list[dict]:
+    records = []
+
+    def add(order: dict, parent_broker_order_id: str | None = None):
+        broker_order_id = str(order["id"])
+        parent_id = (str(order["parent_order_id"])
+                     if order.get("parent_order_id") else parent_broker_order_id)
+        records.append({
+            "broker_order_id": broker_order_id,
+            "client_order_id": order.get("client_order_id"),
+            "parent_broker_order_id": parent_id,
+            "symbol": order.get("symbol"),
+            "side": order.get("side"),
+            "order_type": order.get("order_type") or order.get("type"),
+        })
+        for leg in order.get("legs") or []:
+            add(leg, broker_order_id)
+
+    for order in orders:
+        add(order)
+    return records
 
 
 def save_broker_activities(activities: list[dict]):

@@ -54,6 +54,49 @@ class SnapshotSerializationTests(unittest.TestCase):
         db.execute.assert_called_once()
 
 
+class BrokerOrderMetadataTests(unittest.TestCase):
+    def test_flattens_nested_orders_with_parent_and_order_type(self):
+        from app.database import _flatten_order_metadata
+
+        records = _flatten_order_metadata([{
+            "id": "root",
+            "client_order_id": "kt-root",
+            "symbol": "AAPL",
+            "side": "buy",
+            "type": "market",
+            "legs": [{
+                "id": "child",
+                "client_order_id": "kt-child",
+                "symbol": "AAPL",
+                "side": "sell",
+                "order_type": "stop",
+                "legs": [],
+            }],
+        }])
+
+        self.assertEqual(len(records), 2)
+        self.assertEqual(records[0]["parent_broker_order_id"], None)
+        self.assertEqual(records[1]["parent_broker_order_id"], "root")
+        self.assertEqual(records[1]["order_type"], "stop")
+
+    def test_persists_nested_order_metadata_with_account_snapshot(self):
+        from unittest.mock import MagicMock, patch
+        from app import database
+
+        db = MagicMock()
+        with patch.object(database, "connect") as connect:
+            connect.return_value.__enter__.return_value = db
+            database.update_latest_account_orders([{
+                "id": "root",
+                "legs": [{"id": "child", "legs": []}],
+            }])
+
+        db.execute.assert_called_once()
+        db.cursor.return_value.executemany.assert_called_once()
+        records = db.cursor.return_value.executemany.call_args.args[1]
+        self.assertEqual(records[1]["parent_broker_order_id"], "root")
+
+
 if __name__ == "__main__":
     unittest.main()
 

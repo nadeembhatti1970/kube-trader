@@ -540,3 +540,60 @@ class FlattenIntradayTests(unittest.TestCase):
         self.assertEqual(self.run_flatten(5)[0], [])
         self.clock.is_open = False
         self.assertEqual(self.run_flatten(10)[0], [])
+
+
+class HandleSignalEntryGateTests(unittest.TestCase):
+    def setUp(self):
+        from datetime import datetime, timezone
+
+        self.event = {
+            "action": "buy",
+            "symbol": "AAPL",
+            "pool": "intraday",
+            "ts": datetime.now(timezone.utc).isoformat(),
+        }
+
+    def test_buy_signal_is_skipped_before_reconciliation_when_entries_disabled(self):
+        with patch.object(execution.settings, "execution_enabled", True), \
+                patch.object(execution.settings, "new_entries_enabled", False), \
+                patch("app.services.execution.reconcile") as reconcile, \
+                patch("app.services.execution.place_entry") as place_entry, \
+                self.assertLogs("execution", level="INFO") as captured:
+            handled = execution.handle_signal(object(), self.event, "signal-buy", {})
+
+        self.assertTrue(handled)
+        reconcile.assert_not_called()
+        place_entry.assert_not_called()
+        self.assertIn("New entries disabled", captured.output[0])
+
+    def test_sell_signal_still_closes_managed_position_when_entries_disabled(self):
+        from types import SimpleNamespace
+
+        self.event["action"] = "sell"
+        position = SimpleNamespace(symbol="AAPL")
+        with patch.object(execution.settings, "execution_enabled", True), \
+                patch.object(execution.settings, "new_entries_enabled", False), \
+                patch.object(execution.settings, "stop_management_enabled", True), \
+                patch("app.services.execution.reconcile",
+                      return_value=(object(), [position], {}, [])) as reconcile, \
+                patch("app.services.execution.managed_pool_assignments",
+                      return_value={"AAPL": "intraday"}), \
+                patch("app.services.execution.managed_symbols", return_value={"AAPL"}), \
+                patch("app.services.execution.close_managed_position",
+                      return_value=True) as close_position:
+            handled = execution.handle_signal(object(), self.event, "signal-sell", {})
+
+        self.assertTrue(handled)
+        reconcile.assert_called_once()
+        close_position.assert_called_once()
+
+    def test_buy_signal_reaches_entry_logic_when_enabled(self):
+        with patch.object(execution.settings, "execution_enabled", True), \
+                patch.object(execution.settings, "new_entries_enabled", True), \
+                patch("app.services.execution.reconcile",
+                      return_value=(object(), [], {}, [])), \
+                patch("app.services.execution.place_entry") as place_entry:
+            handled = execution.handle_signal(object(), self.event, "signal-buy", {})
+
+        self.assertTrue(handled)
+        place_entry.assert_called_once()

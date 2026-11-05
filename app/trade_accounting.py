@@ -153,6 +153,12 @@ def build_realized_trade_report(fills: list[dict]) -> dict:
                 "symbol": fill["symbol"],
                 "pool": fill["pool"],
                 "quantity": matched_qty,
+                "entry_attribution_source": entry_fill.get(
+                    "attribution_source", "unattributed"),
+                "exit_attribution_source": fill.get(
+                    "attribution_source", "unattributed"),
+                "entry_fill_source": entry_fill.get("fill_source", "unknown"),
+                "exit_fill_source": fill.get("fill_source", "unknown"),
                 "entry_order_id": entry_fill["broker_order_id"],
                 "exit_order_id": fill["broker_order_id"],
                 "entry_signal_id": entry_fill["signal_id"],
@@ -204,12 +210,21 @@ def build_realized_trade_report(fills: list[dict]) -> dict:
                 "pool": fill["pool"],
                 "order_id": fill["broker_order_id"],
                 "signal_id": fill["signal_id"],
+                "attribution_source": fill.get("attribution_source", "unattributed"),
+                "fill_source": fill.get("fill_source", "unknown"),
                 "unmatched_quantity": remaining_exit,
                 "filled_at": fill.get("filled_at"),
             })
 
     summary_by_pool = _grouped_summary(trades, lambda trade: trade["pool"])
     summary_by_symbol = _grouped_summary(trades, lambda trade: trade["symbol"])
+    summary_by_strategy = _grouped_summary(
+        trades,
+        lambda trade: (
+            str(trade["entry_strategy_config"].get("strategy") or "unknown")
+            if trade["entry_strategy_config"] is not None else "unknown"
+        ),
+    )
     summary_by_entry_order_type = _grouped_summary(
         trades, lambda trade: trade["entry_order_type"] or "unknown",
     )
@@ -244,7 +259,8 @@ def build_realized_trade_report(fills: list[dict]) -> dict:
     summary_by_strategy_symbol_order_type = _grouped_summary(
         trades,
         lambda trade: (
-            f'{trade["pool"]}|{trade["symbol"]}|'
+            f'{(trade["entry_strategy_config"] or {}).get("strategy") or "unknown"}|'
+            f'{trade["symbol"]}|'
             f'{trade["entry_order_type"] or "unknown"}|'
             f'{trade["exit_order_type"] or "unknown"}'
         ),
@@ -263,10 +279,16 @@ def build_realized_trade_report(fills: list[dict]) -> dict:
             "Realized P&L uses broker fill prices, so execution slippage is already reflected. "
             "Net P&L subtracts recorded fees only and is null when either side's fees are unknown."
         ),
+        "attribution": (
+            "Pool attribution uses a recorded order or a recorded parent-order relationship. "
+            "A kt- client order ID can identify an app-created order but does not restore missing "
+            "pool, signal, or strategy configuration. Fills without reliable pool metadata remain "
+            "unattributed; prior trades in the same symbol are not used to infer a pool."
+        ),
         "matching": "FIFO by symbol and strategy pool using broker-reported aggregate order fills",
         "trades": trades,
         "summary_by_pool": summary_by_pool,
-        "summary_by_strategy": summary_by_pool,
+        "summary_by_strategy": summary_by_strategy,
         "summary_by_symbol": summary_by_symbol,
         "summary_by_entry_order_type": summary_by_entry_order_type,
         "summary_by_exit_order_type": summary_by_exit_order_type,
@@ -294,6 +316,12 @@ def build_realized_trade_report(fills: list[dict]) -> dict:
             "slices_missing_entry_signal_values": sum(
                 not trade["entry_strategy_config"]
                 or not trade["entry_strategy_config"].get("signal_values")
+                for trade in trades),
+            "slices_with_unattributed_pool": sum(
+                trade["pool"] == "unattributed" for trade in trades),
+            "slices_with_unattributed_entry_or_exit": sum(
+                trade["entry_attribution_source"] == "unattributed"
+                or trade["exit_attribution_source"] == "unattributed"
                 for trade in trades),
         },
         "fee_data": {

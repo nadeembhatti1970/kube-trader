@@ -105,11 +105,14 @@ class RealizedTradeReportTests(unittest.TestCase):
                 "order_type": "market",
                 "fees": 0.10,
                 "strategy_config": {
+                    "strategy": "swing-sma-v1",
                     "app_version": "0.1.24",
                     "signal_min_spread_pct": 0.001,
                     "signal_min_buy_rsi": 55,
                     "signal_values": {"fast_sma": 101, "slow_sma": 100, "rsi_14": 61},
                 },
+                "attribution_source": "managed_order_ledger",
+                "fill_source": "managed_order_ledger",
             },
             {
                 "client_order_id": "exit",
@@ -128,10 +131,13 @@ class RealizedTradeReportTests(unittest.TestCase):
                 "order_type": "stop",
                 "fees": 0.20,
                 "strategy_config": {
+                    "strategy": "swing-sma-v1",
                     "app_version": "0.1.24",
                     "signal_min_spread_pct": 0.001,
                     "signal_min_buy_rsi": 55,
                 },
+                "attribution_source": "managed_parent_order",
+                "fill_source": "broker_activity",
             },
         ]
 
@@ -140,6 +146,10 @@ class RealizedTradeReportTests(unittest.TestCase):
 
         self.assertEqual(trade["entry_order_type"], "market")
         self.assertEqual(trade["exit_order_type"], "stop")
+        self.assertEqual(trade["entry_attribution_source"], "managed_order_ledger")
+        self.assertEqual(trade["exit_attribution_source"], "managed_parent_order")
+        self.assertEqual(trade["entry_fill_source"], "managed_order_ledger")
+        self.assertEqual(trade["exit_fill_source"], "broker_activity")
         self.assertEqual(trade["entry_strategy_config"]["app_version"], "0.1.24")
         self.assertEqual(
             trade["entry_strategy_config"]["signal_values"]["rsi_14"], 61,
@@ -155,12 +165,15 @@ class RealizedTradeReportTests(unittest.TestCase):
         )
         self.assertEqual(report["data_quality"]["slices_missing_entry_strategy_config"], 0)
         self.assertAlmostEqual(
-            report["summary_by_strategy"]["swing"]["net_realized_pnl"], 19.70,
+            report["summary_by_strategy"]["swing-sma-v1"]["net_realized_pnl"], 19.70,
         )
         self.assertAlmostEqual(
             report["summary_by_strategy_symbol_order_type"]
-            ["swing|AAPL|market|stop"]["gross_realized_pnl"],
+            ["swing-sma-v1|AAPL|market|stop"]["gross_realized_pnl"],
             20,
+        )
+        self.assertAlmostEqual(
+            report["summary_by_pool"]["swing"]["net_realized_pnl"], 19.70,
         )
         self.assertEqual(len(report["summary_by_entry_config"]), 1)
         self.assertEqual(report["summary_by_entry_version"]["0.1.24"]["closed_trade_slices"], 1)
@@ -182,6 +195,46 @@ class RealizedTradeReportTests(unittest.TestCase):
 
         self.assertEqual(report["trades"], [])
         self.assertEqual(report["unmatched_exit_fills"][0]["unmatched_quantity"], 2.0)
+
+
+class TradeAttributionTests(unittest.TestCase):
+    def test_unattributed_exit_is_not_matched_to_a_prior_pool(self):
+        start = datetime(2026, 10, 23, 14, tzinfo=timezone.utc)
+        report = build_realized_trade_report([
+            {
+                "client_order_id": "managed-entry",
+                "broker_order_id": "broker-entry",
+                "signal_id": "entry-signal",
+                "symbol": "AAPL",
+                "side": "buy",
+                "pool": "intraday",
+                "filled_qty": 2,
+                "filled_avg_price": 100,
+                "filled_at": start,
+                "attribution_source": "managed_order_ledger",
+                "fill_source": "managed_order_ledger",
+            },
+            {
+                "client_order_id": "broker-exit",
+                "broker_order_id": "broker-exit",
+                "signal_id": None,
+                "symbol": "AAPL",
+                "side": "sell",
+                "pool": "unattributed",
+                "filled_qty": 2,
+                "filled_avg_price": 110,
+                "filled_at": start + timedelta(minutes=1),
+                "attribution_source": "unattributed",
+                "fill_source": "broker_activity",
+            },
+        ])
+
+        self.assertEqual(report["trades"], [])
+        self.assertEqual(report["unmatched_exit_fills"][0]["pool"], "unattributed")
+        self.assertEqual(
+            report["unmatched_exit_fills"][0]["attribution_source"], "unattributed",
+        )
+        self.assertEqual(report["open_managed_quantities"][0]["pool"], "intraday")
 
 
 if __name__ == "__main__":

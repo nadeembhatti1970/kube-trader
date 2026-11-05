@@ -22,6 +22,7 @@ class TradeReportMetadataTests(unittest.TestCase):
             main.settings.signal_min_spread_pct,
         )
         self.assertIn("new orders only", metadata["note"])
+        self.assertIn("managed ledger", metadata["note"])
 
     def test_strategy_provenance_records_effective_risk_controls(self):
         configured = Settings(
@@ -34,6 +35,7 @@ class TradeReportMetadataTests(unittest.TestCase):
 
         provenance = strategy_config(configured)
 
+        self.assertFalse(provenance["risk_controls"]["new_entries_enabled"])
         self.assertEqual(
             provenance["risk_controls"]["configured_max_trade_risk_pct"], 0.02,
         )

@@ -30,6 +30,7 @@ Alpaca's `StockDataStream` supplies minute bars. The configured feed defaults to
 | `ALPACA_API_KEY`, `ALPACA_SECRET_KEY` | empty | Alpaca credentials matching the selected endpoint |
 | `MARKET_STREAM_ENABLED` | `false` | Allows the ingestion worker to start the stream |
 | `EXECUTION_ENABLED` | `false` | Allows signal-driven entries/exits on the selected endpoint |
+| `NEW_ENTRIES_ENABLED` | `false` | Allows buy entries; false still allows managed signal exits when execution is enabled |
 | `STOP_MANAGEMENT_ENABLED` | `false` | Repairs missing stops on bot-managed positions |
 | `ALPACA_DATA_FEED` | `iex` | Alpaca stock stream feed, `iex` or `sip` |
 | `MAX_TRADE_RISK_PCT` | `0.01` | Requested risk budget, capped in code at 1% of equity |
@@ -94,6 +95,7 @@ The breaker does not terminate a pod, cancel bracket exits, or liquidate positio
 - `GET /healthz`: API process liveness.
 - `GET /readyz`: PostgreSQL connectivity.
 - `GET /backtests/{symbol}`: latest rolling metrics.
+- `GET /trades`: realized P&L with gross/net fee completeness, fill source, and attribution source; absent fee or strategy metadata stays unknown.
 - `GET /account/reconciliation`: latest account and allocation snapshot, including `ledger_discrepancies` and `warnings`. JSON GET responses are named `<endpoint>_<UTC timestamp>.json` via `Content-Disposition` (`attachment` only with `?download=true`; otherwise `inline`).
 - `GET /risk`: current New York-date breaker state.
 

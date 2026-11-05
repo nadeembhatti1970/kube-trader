@@ -30,6 +30,7 @@ class Settings(BaseSettings):
     symbol_loss_cooldown_seconds: int = 0
     symbol_daily_loss_limit: float = 0.0
     execution_enabled: bool = False
+    new_entries_enabled: bool = False
     stop_management_enabled: bool = False
     market_stream_enabled: bool = False
     extended_hours_sampling_enabled: bool = False
@@ -97,6 +98,7 @@ def strategy_config(settings: Settings | None = None, event: dict | None = None)
             "core_allocation_pct": current.core_allocation_pct,
             "stop_management_enabled": current.stop_management_enabled,
             "execution_enabled": current.execution_enabled,
+            "new_entries_enabled": current.new_entries_enabled,
         },
     }
     if event:
