@@ -512,6 +512,32 @@ class BackfillOrderTypeTests(unittest.TestCase):
         save.assert_called_once_with("stop-leg", "stop")
 
 
+class BrokerActivitySyncTests(unittest.TestCase):
+    @patch("app.services.execution.update_broker_activity_sync")
+    @patch("app.services.execution.save_broker_activities")
+    @patch("app.services.execution.fetch_account_activities", return_value=[])
+    @patch("app.services.execution.broker_activity_sync_status", return_value=[])
+    @patch("app.services.execution.httpx.Client")
+    def test_syncs_fee_activities_separately_from_trade_fills(
+            self, http_client, _sync_status, fetch_activities,
+            _save_activities, _update_sync):
+        with (
+            patch.object(execution.settings, "alpaca_activity_sync_seconds", 300),
+            patch.object(execution.settings, "alpaca_activity_lookback_days", 30),
+            patch.object(execution.settings, "alpaca_paper", True),
+        ):
+            execution.sync_broker_account_activities()
+
+        self.assertEqual(
+            [call.args[1] for call in fetch_activities.call_args_list],
+            ["FILL", "TRANS", "MISC", "FEE"],
+        )
+        self.assertEqual(
+            http_client.call_args.kwargs["base_url"],
+            "https://paper-api.alpaca.markets",
+        )
+
+
 class FlattenIntradayTests(unittest.TestCase):
     def setUp(self):
         from datetime import datetime, timedelta, timezone

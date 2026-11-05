@@ -96,6 +96,28 @@ class BrokerOrderMetadataTests(unittest.TestCase):
         records = db.cursor.return_value.executemany.call_args.args[1]
         self.assertEqual(records[1]["parent_broker_order_id"], "root")
 
+    def test_persists_fee_activity_amount_without_assigning_order_fees(self):
+        from unittest.mock import MagicMock, patch
+        from app import database
+
+        db = MagicMock()
+        with patch.object(database, "connect") as connect:
+            connect.return_value.__enter__.return_value = db
+            database.save_broker_activities([{
+                "id": "fee-activity",
+                "activity_type": "FEE",
+                "date": "2026-11-04",
+                "activity_sub_type": "REG",
+                "net_amount": "-0.42",
+            }])
+
+        record = db.cursor.return_value.executemany.call_args.args[1][0]
+        self.assertEqual(record["activity_type"], "FEE")
+        self.assertEqual(float(record["net_amount"]), -0.42)
+        self.assertIsNone(record["order_id"])
+        self.assertIsNone(record["fees"])
+        self.assertIn('"activity_sub_type": "REG"', record["raw"])
+
 
 if __name__ == "__main__":
     unittest.main()

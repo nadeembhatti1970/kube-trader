@@ -37,7 +37,7 @@ log = logging.getLogger("execution")
 settings = get_settings()
 NY = ZoneInfo("America/New_York")
 POOL_WEIGHTS = {"intraday": 0.20, "swing": 0.30, "core": 0.50}
-ACCOUNT_ACTIVITY_TYPES = ("FILL", "TRANS", "MISC")
+ACCOUNT_ACTIVITY_TYPES = ("FILL", "TRANS", "MISC", "FEE")
 
 
 def pool_weights():
