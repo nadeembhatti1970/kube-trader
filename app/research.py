@@ -373,15 +373,48 @@ def evaluate_ohlc_walk_forward(
         return {"bars": len(bars), "status": "insufficient_history",
                 "required_bars": required}
 
-    simulation = simulate_ohlc(
-        bars, strategy, cost_bps, min_spread_pct, min_buy_rsi,
+    simulation_args = (
+        min_spread_pct, min_buy_rsi,
         stop_loss_pct, take_profit_pct, intraday_flatten_minutes,
         intraday_entry_cutoff_minutes, swing_atr_period, swing_atr_multiple,
         core_stop_loss_pct, fast_period, slow_period,
     )
+
+    def simulate_at_cost(cost: float) -> dict:
+        return simulate_ohlc(
+            bars, strategy, cost, *simulation_args,
+        )
+
+    simulation = simulate_at_cost(cost_bps)
     split = int(len(bars) * train_fraction)
     periods = STRATEGIES[strategy]["periods_per_year"]
     trades = simulation["trades"]
+    out_of_sample_trades = [
+        trade for trade in trades if trade["exit_index"] >= split
+    ]
+    cost_sensitivity = []
+    for additional_cost_bps in (5, 10):
+        scenario_cost = cost_bps + additional_cost_bps
+        if scenario_cost > 100:
+            cost_sensitivity.append({
+                "additional_cost_bps_per_side": additional_cost_bps,
+                "status": "skipped",
+                "reason": "scenario exceeds the 100 bps per-side simulator limit",
+            })
+            continue
+        scenario = simulate_at_cost(scenario_cost)
+        cost_sensitivity.append({
+            "additional_cost_bps_per_side": additional_cost_bps,
+            "cost_bps_per_side": scenario_cost,
+            "status": "computed",
+            "out_of_sample": _simulation_summary(
+                scenario["bar_returns"][split:],
+                scenario["benchmark_returns"][split:],
+                [trade for trade in scenario["trades"]
+                 if trade["exit_index"] >= split],
+                periods,
+            ),
+        })
     return {
         "bars": len(bars),
         "frequency": STRATEGIES[strategy]["frequency"],
@@ -424,9 +457,16 @@ def evaluate_ohlc_walk_forward(
         "out_of_sample": _simulation_summary(
             simulation["bar_returns"][split:],
             simulation["benchmark_returns"][split:],
-            [trade for trade in trades if trade["exit_index"] >= split],
+            out_of_sample_trades,
             periods,
         ),
+        "out_of_sample_cost_sensitivity": {
+            "interpretation": (
+                "Recomputed out-of-sample results with 5 and 10 additional basis points "
+                "charged per side; these are cost stresses, not predictions of actual costs."
+            ),
+            "scenarios": cost_sensitivity,
+        },
         "open_trade_at_end": simulation["open_trade"],
         "entry_count": simulation["entry_count"],
         "limitations": [

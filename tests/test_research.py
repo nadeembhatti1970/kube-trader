@@ -53,6 +53,29 @@ class WalkForwardResearchTests(unittest.TestCase):
             result["out_of_sample"]["total_return"],
             without_costs["out_of_sample"]["total_return"],
         )
+        scenarios = result["out_of_sample_cost_sensitivity"]["scenarios"]
+        self.assertEqual([scenario["cost_bps_per_side"] for scenario in scenarios], [10, 15])
+        self.assertTrue(all(scenario["status"] == "computed" for scenario in scenarios))
+        self.assertLess(
+            scenarios[0]["out_of_sample"]["total_return"],
+            result["out_of_sample"]["total_return"],
+        )
+        self.assertLess(
+            scenarios[1]["out_of_sample"]["total_return"],
+            scenarios[0]["out_of_sample"]["total_return"],
+        )
+
+    def test_cost_sensitivity_skips_scenarios_above_simulator_limit(self):
+        result = evaluate_ohlc_walk_forward(
+            self.bars([100.0 + index for index in range(50)]),
+            "intraday", cost_bps=95, train_fraction=0.7,
+        )
+
+        scenarios = result["out_of_sample_cost_sensitivity"]["scenarios"]
+        self.assertEqual(scenarios[0]["status"], "computed")
+        self.assertEqual(scenarios[0]["cost_bps_per_side"], 100)
+        self.assertEqual(scenarios[1]["status"], "skipped")
+        self.assertNotIn("out_of_sample", scenarios[1])
 
     def test_ohlc_walk_forward_reports_execution_assumptions_and_risk_config(self):
         closes = [100.0] * 20 + [104.0, 104.0] + [100.0] * 30

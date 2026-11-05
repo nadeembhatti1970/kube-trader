@@ -80,6 +80,12 @@ class RealizedTradeReportTests(unittest.TestCase):
         self.assertEqual(report["data_quality"]["slices_with_entry_strategy_config"], 0)
         self.assertFalse(report["fees_complete"])
         self.assertIsNone(report["summary_by_pool"]["intraday"]["net_realized_pnl"])
+        self.assertEqual(report["profitability_evidence"]["status"], "incomplete")
+        self.assertFalse(report["profitability_evidence"]["net_pnl_measurable"])
+        self.assertIn(
+            "complete_order_linked_fees",
+            report["profitability_evidence"]["unmet_requirements"],
+        )
         self.assertAlmostEqual(
             report["summary_by_symbol"]["AAPL"]["average_holding_seconds"],
             (300.0 + 290.0) / 2,
@@ -160,6 +166,11 @@ class RealizedTradeReportTests(unittest.TestCase):
         self.assertAlmostEqual(trade["fees"], 0.30)
         self.assertAlmostEqual(trade["net_realized_pnl"], 19.70)
         self.assertTrue(report["fees_complete"])
+        self.assertEqual(report["profitability_evidence"]["status"], "measurable")
+        self.assertTrue(report["profitability_evidence"]["net_pnl_measurable"])
+        self.assertTrue(
+            report["profitability_evidence"]["strategy_attribution_complete"],
+        )
         self.assertEqual(
             report["fee_data"]["slices_with_complete_entry_and_exit_fees"], 1,
         )
@@ -179,6 +190,12 @@ class RealizedTradeReportTests(unittest.TestCase):
         self.assertEqual(report["summary_by_entry_version"]["0.1.24"]["closed_trade_slices"], 1)
         cohort = next(iter(report["summary_by_entry_config"].values()))
         self.assertEqual(cohort["gross_realized_pnl"], 20)
+        fills[1]["attribution_source"] = None
+        incomplete_attribution = build_realized_trade_report(fills)
+        self.assertFalse(
+            incomplete_attribution["profitability_evidence"]
+            ["strategy_attribution_complete"],
+        )
 
     def test_reports_sell_fills_without_a_managed_entry_as_unmatched(self):
         report = build_realized_trade_report([{

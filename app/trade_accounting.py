@@ -51,6 +51,36 @@ def _grouped_summary(trades: list[dict], key_for_trade) -> dict:
     return {key: _summarize(group) for key, group in sorted(groups.items())}
 
 
+def _profitability_evidence(trades: list[dict]) -> dict:
+    has_trades = bool(trades)
+    fees_complete = has_trades and all(trade["fees"] is not None for trade in trades)
+    reliable_sources = {"managed_order_ledger", "managed_parent_order"}
+    strategy_attribution_complete = has_trades and all(
+        trade["pool"] != "unattributed"
+        and trade["entry_strategy_config"] is not None
+        and trade["entry_attribution_source"] in reliable_sources
+        and trade["exit_attribution_source"] in reliable_sources
+        for trade in trades
+    )
+    unmet_requirements = []
+    if not has_trades:
+        unmet_requirements.append("closed_trades")
+    if not fees_complete:
+        unmet_requirements.append("complete_order_linked_fees")
+    if not strategy_attribution_complete:
+        unmet_requirements.append("reliable_strategy_attribution")
+    return {
+        "status": "measurable" if not unmet_requirements else "incomplete",
+        "net_pnl_measurable": fees_complete,
+        "strategy_attribution_complete": strategy_attribution_complete,
+        "unmet_requirements": unmet_requirements,
+        "note": (
+            "Measurement status only; it is not evidence that a strategy is profitable "
+            "or fit for live trading."
+        ),
+    }
+
+
 def reconcile_open_quantities(ledger_open: list[dict], broker_positions: list[dict],
                               tolerance: float = 1e-6) -> dict:
     """Compare ledger open lots with Alpaca positions, treating Alpaca as the source of truth."""
@@ -296,6 +326,7 @@ def build_realized_trade_report(fills: list[dict]) -> dict:
         "summary_by_entry_version": summary_by_entry_version,
         "summary_by_strategy_symbol_order_type": summary_by_strategy_symbol_order_type,
         "fees_complete": bool(trades) and all(trade["fees"] is not None for trade in trades),
+        "profitability_evidence": _profitability_evidence(trades),
         "open_managed_quantities": open_positions,
         "unmatched_exit_fills": unmatched_exits,
         "data_quality": {
