@@ -10,7 +10,7 @@ config:
   marketDataProvider: yfinance
   marketStreamEnabled: true
   executionEnabled: true
-  newEntriesEnabled: false
+  newEntriesEnabled: true
   stopManagementEnabled: true
   alpacaPaper: true
   alpacaDataFeed: iex
