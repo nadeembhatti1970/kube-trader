@@ -61,7 +61,7 @@ postgres:
   image: postgres:16-alpine
   storage: 10Gi
 redis:
-  image: redis:7-alpine
+  image: redis:8-alpine
   storage: 2Gi
 secrets:
   existingSecret: kube-trader-secrets
