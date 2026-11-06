@@ -1,6 +1,8 @@
 import unittest
 from unittest.mock import patch
 
+from fastapi.testclient import TestClient
+
 from app import main
 from app.settings import Settings, strategy_config
 
@@ -46,6 +48,30 @@ class TradeReportMetadataTests(unittest.TestCase):
             provenance["risk_controls"]["symbol_loss_cooldown_seconds"], 1800,
         )
         self.assertEqual(provenance["risk_controls"]["symbol_daily_loss_limit"], 50)
+
+    def test_research_candidate_does_not_change_baseline(self):
+        bars = [{"open": 100.0 + index / 10, "high": 100.0 + index / 10,
+                 "low": 100.0 + index / 10, "close": 100.0 + index / 10}
+                for index in range(250)]
+        for index, bar in enumerate(bars):
+            bar["ts"] = f"2026-01-01T00:{index // 60:02d}:{index % 60:02d}+00:00"
+        with patch.object(main, "recent_bars", return_value=bars), \
+                patch.object(main, "get_daily_bars", return_value=bars), \
+                patch.object(main.settings, "intraday_flatten_minutes", 0), \
+                patch.object(main.settings, "intraday_entry_cutoff_minutes", 0):
+            client = TestClient(main.app)
+            baseline = client.get("/research/backtests/AAPL").json()
+            response = client.get(
+                "/research/backtests/AAPL",
+                params={"candidate_min_spread_pct": 0.02, "candidate_min_buy_rsi": 65},
+            )
+        self.assertEqual(response.status_code, 200)
+        candidate = response.json()
+        self.assertEqual(candidate["strategies"], baseline["strategies"])
+        self.assertEqual(
+            candidate["intraday_candidate"]["result"]["buy_confirmation_filter"],
+            {"min_spread_pct": 0.02, "min_rsi_14": 65},
+        )
 
 
 if __name__ == "__main__":

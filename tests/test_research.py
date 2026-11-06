@@ -74,6 +74,42 @@ class WalkForwardResearchTests(unittest.TestCase):
             sum(window["bars"] for window in windows),
             len(bars) - int(len(bars) * 0.7),
         )
+        rolling = result["rolling_out_of_sample"]["windows"]
+        self.assertEqual(len(rolling), 3)
+        self.assertEqual(rolling[0]["test_start_index"], len(bars) // 2)
+        self.assertEqual(rolling[-1]["test_end_index_exclusive"], len(bars))
+        for left, right in zip(rolling, rolling[1:]):
+            self.assertEqual(left["test_end_index_exclusive"], right["test_start_index"])
+        for window in rolling:
+            self.assertEqual(
+                window["metrics"]["observations"],
+                window["test_end_index_exclusive"] - window["test_start_index"],
+            )
+            if window["open_trade_at_end"]:
+                self.assertGreaterEqual(
+                    window["open_trade_at_end"]["entry_index"], window["test_start_index"],
+                )
+
+    def test_rolling_window_is_independent_of_future_prices(self):
+        closes = [100 + (index % 80 if index % 80 < 40 else 80 - index % 80) * 0.1
+                  for index in range(250)]
+        bars = self.bars(closes)
+        baseline = evaluate_ohlc_walk_forward(bars, "intraday", 5, 0.7)
+        end = baseline["rolling_out_of_sample"]["windows"][0]["test_end_index_exclusive"]
+        later_changed = bars[:end] + self.bars([500.0] * (len(bars) - end))
+        updated = evaluate_ohlc_walk_forward(later_changed, "intraday", 5, 0.7)
+        self.assertEqual(
+            baseline["rolling_out_of_sample"]["windows"][0],
+            updated["rolling_out_of_sample"]["windows"][0],
+        )
+
+    def test_rolling_simulation_does_not_carry_position_into_test(self):
+        bars = self.bars([100.0] * 20 + [110.0] * 60)
+        continuous = simulate_ohlc(bars, "intraday", 0)
+        flat_at_boundary = simulate_ohlc(bars, "intraday", 0, trade_start_index=40)
+        self.assertEqual(continuous["entry_count"], 1)
+        self.assertEqual(flat_at_boundary["entry_count"], 0)
+        self.assertIsNone(flat_at_boundary["open_trade"])
 
     def test_simulation_summary_reports_net_payoff_metrics(self):
         summary = _simulation_summary(

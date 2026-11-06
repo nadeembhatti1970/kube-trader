@@ -125,6 +125,8 @@ def research_backtest(
     days: int = Query(default=1260, ge=260, le=2520),
     cost_bps: float | None = Query(default=None, ge=0, le=100),
     train_fraction: float | None = Query(default=None, ge=0.5, le=0.9),
+    candidate_min_spread_pct: float | None = Query(default=None, ge=0),
+    candidate_min_buy_rsi: float | None = Query(default=None, ge=0, le=100),
 ):
     ticker = symbol.upper()
     costs = settings.backtest_cost_bps if cost_bps is None else cost_bps
@@ -141,7 +143,7 @@ def research_backtest(
             "swing_atr_multiple": settings.swing_atr_multiple,
             "core_stop_loss_pct": settings.core_stop_loss_pct,
         }
-        return {
+        report = {
             "symbol": ticker,
             "app_version": settings.app_version,
             "strategy_config": strategy_config(settings),
@@ -170,6 +172,24 @@ def research_backtest(
                 ),
             },
         }
+        if candidate_min_spread_pct is not None or candidate_min_buy_rsi is not None:
+            spread = (settings.signal_min_spread_pct if candidate_min_spread_pct is None
+                      else candidate_min_spread_pct)
+            rsi = (settings.signal_min_buy_rsi if candidate_min_buy_rsi is None
+                   else candidate_min_buy_rsi)
+            report["intraday_candidate"] = {
+                "note": (
+                    "Research only; simulated with the same bars, costs, and risk assumptions "
+                    "as the configured intraday baseline. No settings or orders are changed."
+                ),
+                "result": evaluate_ohlc_walk_forward(
+                    minute_rows, "intraday", costs, split, spread, rsi,
+                    fast_period=settings.signal_fast_bars,
+                    slow_period=settings.signal_slow_bars,
+                    **model_config,
+                ),
+            }
+        return report
     except Exception as exc:
         raise HTTPException(status_code=502, detail=f"Research backtest unavailable: {exc}") from exc
 

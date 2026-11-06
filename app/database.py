@@ -358,7 +358,8 @@ def managed_fills() -> list[dict]:
                    f.qty AS filled_qty, f.avg_price AS filled_avg_price,
                    o.reference_timestamp,
                    COALESCE(o.order_type, t.order_type, m.order_type) AS order_type,
-                   COALESCE(o.fees, f.fees) AS fees, o.strategy_config,
+                   COALESCE(CASE WHEN o.filled_qty = f.qty THEN o.fees END,
+                            f.fees) AS fees, o.strategy_config,
                    CASE
                      WHEN o.broker_order_id IS NOT NULL THEN 'managed_order_ledger'
                      WHEN parent_order.broker_order_id IS NOT NULL THEN 'managed_parent_order'
@@ -376,14 +377,20 @@ def managed_fills() -> list[dict]:
             WHERE o.broker_order_id IS NULL
                OR NOT (COALESCE(o.filled_qty, 0) > 0 AND o.filled_avg_price IS NOT NULL)
           ), recorded AS (
-            SELECT client_order_id, broker_order_id, signal_id, symbol, side, pool, qty,
-                   signal_timestamp, reference_price, submitted_at, filled_at,
-                   filled_qty, filled_avg_price, reference_timestamp, order_type, fees,
-                   strategy_config, 'managed_order_ledger' AS attribution_source,
+            SELECT o.client_order_id, o.broker_order_id, o.signal_id, o.symbol, o.side,
+                   o.pool, o.qty, o.signal_timestamp, o.reference_price, o.submitted_at,
+                   o.filled_at, o.filled_qty, o.filled_avg_price, o.reference_timestamp,
+                   o.order_type,
+                   COALESCE(o.fees, CASE
+                     WHEN f.qty = o.filled_qty THEN f.fees
+                   END) AS fees,
+                   o.strategy_config, 'managed_order_ledger' AS attribution_source,
                    'managed_order_ledger' AS fill_source
-            FROM orders
-            WHERE filled_qty > 0 AND filled_avg_price IS NOT NULL
-              AND side IN ('buy', 'sell')
+            FROM orders o
+            LEFT JOIN activity_fills f ON f.order_id = o.broker_order_id
+              AND f.symbol = o.symbol AND f.side = o.side
+            WHERE o.filled_qty > 0 AND o.filled_avg_price IS NOT NULL
+              AND o.side IN ('buy', 'sell')
           )
           SELECT * FROM (
             SELECT * FROM recorded UNION ALL SELECT * FROM broker_only

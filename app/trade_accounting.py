@@ -81,6 +81,31 @@ def _profitability_evidence(trades: list[dict]) -> dict:
     }
 
 
+def _entry_cohorts(trades: list[dict]) -> list[dict]:
+    groups = defaultdict(list)
+    for trade in trades:
+        entry_time = trade["entry_filled_at"]
+        month = (entry_time.astimezone(timezone.utc).strftime("%Y-%m")
+                 if entry_time and entry_time.tzinfo else "unknown")
+        version = str((trade["entry_strategy_config"] or {}).get("app_version") or "unknown")
+        groups[(month, version)].append(trade)
+    result = []
+    for (month, version), group in sorted(groups.items()):
+        summary = _summarize(group)
+        summary.update({
+            "entry_month_utc": month,
+            "entry_app_version": version,
+            "distinct_entry_order_ids": len({
+                trade["entry_order_id"] for trade in group if trade["entry_order_id"]
+            }),
+            "slices_missing_entry_order_id": sum(not trade["entry_order_id"] for trade in group),
+            "slices_with_complete_fees": sum(trade["fees"] is not None for trade in group),
+            "profitability_evidence": _profitability_evidence(group),
+        })
+        result.append(summary)
+    return result
+
+
 def reconcile_open_quantities(ledger_open: list[dict], broker_positions: list[dict],
                               tolerance: float = 1e-6) -> dict:
     """Compare ledger open lots with Alpaca positions, treating Alpaca as the source of truth."""
@@ -325,6 +350,7 @@ def build_realized_trade_report(fills: list[dict]) -> dict:
         "summary_by_exit_order_type": summary_by_exit_order_type,
         "summary_by_entry_config": summary_by_entry_config,
         "summary_by_entry_version": summary_by_entry_version,
+        "entry_month_version_cohorts": _entry_cohorts(trades),
         "summary_by_strategy_symbol_order_type": summary_by_strategy_symbol_order_type,
         "fees_complete": bool(trades) and all(trade["fees"] is not None for trade in trades),
         "profitability_evidence": _profitability_evidence(trades),

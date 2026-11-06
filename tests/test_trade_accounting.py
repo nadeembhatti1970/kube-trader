@@ -5,6 +5,29 @@ from app.trade_accounting import build_realized_trade_report
 
 
 class RealizedTradeReportTests(unittest.TestCase):
+    def test_cohort_counts_one_entry_order_for_multiple_exit_slices(self):
+        start = datetime(2026, 11, 6, 15, tzinfo=timezone.utc)
+        common = {"symbol": "AAPL", "pool": "intraday", "signal_id": "signal",
+                  "attribution_source": "managed_order_ledger", "fees": 0.0}
+        fills = [
+            {**common, "client_order_id": "entry", "broker_order_id": "entry-id",
+             "side": "buy", "filled_qty": 2, "filled_avg_price": 100, "filled_at": start,
+             "strategy_config": {"app_version": "0.1.32", "strategy": "example"}},
+            {**common, "client_order_id": "exit-1", "broker_order_id": "exit-id-1",
+             "side": "sell", "filled_qty": 1, "filled_avg_price": 101,
+             "filled_at": start + timedelta(minutes=1)},
+            {**common, "client_order_id": "exit-2", "broker_order_id": "exit-id-2",
+             "side": "sell", "filled_qty": 1, "filled_avg_price": 99,
+             "filled_at": start + timedelta(minutes=2)},
+        ]
+        cohort = build_realized_trade_report(fills)["entry_month_version_cohorts"][0]
+        self.assertEqual(cohort["closed_trade_slices"], 2)
+        self.assertEqual(cohort["distinct_entry_order_ids"], 1)
+        self.assertEqual(cohort["entry_month_utc"], "2026-11")
+        self.assertEqual(cohort["entry_app_version"], "0.1.32")
+        self.assertEqual(cohort["slices_with_complete_fees"], 2)
+        self.assertEqual(cohort["net_realized_pnl"], 0)
+
     def test_matches_partial_exit_fifo_and_reports_gross_pnl(self):
         start = datetime(2026, 10, 23, 14, tzinfo=timezone.utc)
         fills = [
@@ -74,6 +97,12 @@ class RealizedTradeReportTests(unittest.TestCase):
         }])
         self.assertEqual(report["summary_by_pool"]["intraday"]["gross_realized_pnl"], 38.0)
         self.assertEqual(report["summary_by_pool"]["intraday"]["win_rate_pct"], 100.0)
+        cohort = report["entry_month_version_cohorts"][0]
+        self.assertEqual(cohort["entry_month_utc"], "2026-10")
+        self.assertEqual(cohort["closed_trade_slices"], 2)
+        self.assertEqual(cohort["distinct_entry_order_ids"], 2)
+        self.assertEqual(cohort["slices_with_complete_fees"], 0)
+        self.assertIsNone(cohort["net_realized_pnl"])
         self.assertEqual(
             report["summary_by_entry_version"]["unknown"]["closed_trade_slices"], 2,
         )
@@ -166,6 +195,11 @@ class RealizedTradeReportTests(unittest.TestCase):
         self.assertAlmostEqual(trade["fees"], 0.30)
         self.assertAlmostEqual(trade["net_realized_pnl"], 19.70)
         self.assertTrue(report["fees_complete"])
+        cohort = report["entry_month_version_cohorts"][0]
+        self.assertEqual(cohort["entry_app_version"], "0.1.24")
+        self.assertEqual(cohort["distinct_entry_order_ids"], 1)
+        self.assertEqual(cohort["slices_with_complete_fees"], 1)
+        self.assertAlmostEqual(cohort["net_realized_pnl"], 19.70)
         self.assertEqual(report["profitability_evidence"]["status"], "measurable")
         self.assertTrue(report["profitability_evidence"]["net_pnl_measurable"])
         self.assertTrue(

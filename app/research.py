@@ -141,6 +141,7 @@ def simulate_ohlc(
     core_stop_loss_pct: float = 0.20,
     fast_period: int | None = None,
     slow_period: int | None = None,
+    trade_start_index: int = 0,
 ) -> dict:
     """Simulate long-only signals with next-open fills and protective OHLC exits."""
     if strategy not in STRATEGIES:
@@ -157,6 +158,8 @@ def simulate_ohlc(
         raise ValueError("intraday time limits cannot be negative")
     if swing_atr_period < 1 or swing_atr_multiple <= 0:
         raise ValueError("swing ATR settings must be positive")
+    if trade_start_index < 0:
+        raise ValueError("trade_start_index cannot be negative")
     if not bars:
         return {"bar_returns": [], "benchmark_returns": [], "trades": [],
                 "open_trade": None, "entry_count": 0}
@@ -261,7 +264,8 @@ def simulate_ohlc(
             position = None
             continue
 
-        if pending and pending["action"] == "buy" and position is None:
+        if (index >= trade_start_index and pending and pending["action"] == "buy"
+                and position is None):
             remaining = _intraday_minutes_to_close(bar) if strategy == "intraday" else None
             entry_cutoff = max(intraday_entry_cutoff_minutes,
                                intraday_flatten_minutes if strategy == "intraday" else 0)
@@ -421,6 +425,28 @@ def evaluate_ohlc_walk_forward(
                 periods,
             ),
         })
+    rolling_start = max(effective_slow + 1, len(bars) // 2)
+    rolling_count = min(3, len(bars) - rolling_start)
+    rolling_windows = []
+    for window in range(rolling_count):
+        start = rolling_start + window * (len(bars) - rolling_start) // rolling_count
+        end = rolling_start + (window + 1) * (len(bars) - rolling_start) // rolling_count
+        rolling = simulate_ohlc(
+            bars[:end], strategy, cost_bps, *simulation_args,
+            trade_start_index=start,
+        )
+        rolling_windows.append({
+            "history_start_index": 0,
+            "test_start_index": start,
+            "test_end_index_exclusive": end,
+            "metrics": _simulation_summary(
+                rolling["bar_returns"][start:end],
+                rolling["benchmark_returns"][start:end],
+                rolling["trades"],
+                periods,
+            ),
+            "open_trade_at_end": rolling["open_trade"],
+        })
     cost_sensitivity = []
     for additional_cost_bps in (5, 10):
         scenario_cost = cost_bps + additional_cost_bps
@@ -496,6 +522,15 @@ def evaluate_ohlc_walk_forward(
                 "not independent samples or separately trained models."
             ),
             "windows": out_of_sample_subperiods,
+        },
+        "rolling_out_of_sample": {
+            "interpretation": (
+                "Fixed parameters; expanding historical signal warmup followed by disjoint "
+                "test windows. Each simulation starts flat at its test boundary. No model "
+                "is trained or parameters selected; open positions are marked to market "
+                "at window end without a forced exit or exit cost."
+            ),
+            "windows": rolling_windows,
         },
         "out_of_sample_cost_sensitivity": {
             "interpretation": (
