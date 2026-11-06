@@ -58,7 +58,7 @@ persistence:
   size: 2Gi
   storageClass: ""
 postgres:
-  image: postgres:16-alpine
+  image: postgres:18-alpine
   storage: 10Gi
 redis:
   image: redis:7-alpine
