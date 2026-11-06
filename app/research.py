@@ -326,13 +326,24 @@ def simulate_ohlc(
 def _simulation_summary(bar_returns: list[float], benchmark_returns: list[float],
                         trades: list[dict], periods_per_year: int) -> dict:
     result = summarize(bar_returns, benchmark_returns, len(trades), periods_per_year)
-    wins = [trade for trade in trades if trade["net_return_pct"] > 0]
-    losses = [trade for trade in trades if trade["net_return_pct"] < 0]
+    win_returns = [trade["net_return_pct"] for trade in trades
+                   if trade["net_return_pct"] > 0]
+    loss_returns = [trade["net_return_pct"] for trade in trades
+                    if trade["net_return_pct"] < 0]
+    net_profit = sum(win_returns)
+    net_loss = sum(loss_returns)
     result.update({
         "closed_trades": len(trades),
-        "wins": len(wins),
-        "losses": len(losses),
-        "win_rate_pct": len(wins) / len(trades) * 100 if trades else None,
+        "wins": len(win_returns),
+        "losses": len(loss_returns),
+        "win_rate_pct": len(win_returns) / len(trades) * 100 if trades else None,
+        "average_net_win_return_pct": (
+            net_profit / len(win_returns) if win_returns else None
+        ),
+        "average_net_loss_return_pct": (
+            net_loss / len(loss_returns) if loss_returns else None
+        ),
+        "net_profit_factor": net_profit / abs(net_loss) if net_loss else None,
         "average_net_trade_return_pct": (
             sum(trade["net_return_pct"] for trade in trades) / len(trades)
             if trades else None
@@ -392,6 +403,24 @@ def evaluate_ohlc_walk_forward(
     out_of_sample_trades = [
         trade for trade in trades if trade["exit_index"] >= split
     ]
+    out_of_sample_length = len(bars) - split
+    window_count = min(3, out_of_sample_length)
+    out_of_sample_subperiods = []
+    for window in range(window_count):
+        start = split + window * out_of_sample_length // window_count
+        end = split + (window + 1) * out_of_sample_length // window_count
+        out_of_sample_subperiods.append({
+            "start_index": start,
+            "end_index_exclusive": end,
+            "bars": end - start,
+            "metrics": _simulation_summary(
+                simulation["bar_returns"][start:end],
+                simulation["benchmark_returns"][start:end],
+                [trade for trade in trades
+                 if start <= trade["exit_index"] < end],
+                periods,
+            ),
+        })
     cost_sensitivity = []
     for additional_cost_bps in (5, 10):
         scenario_cost = cost_bps + additional_cost_bps
@@ -460,6 +489,14 @@ def evaluate_ohlc_walk_forward(
             out_of_sample_trades,
             periods,
         ),
+        "out_of_sample_subperiods": {
+            "interpretation": (
+                "Contiguous chronological slices of the same fixed-strategy simulation. "
+                "Positions may carry across boundaries; these are descriptive periods, "
+                "not independent samples or separately trained models."
+            ),
+            "windows": out_of_sample_subperiods,
+        },
         "out_of_sample_cost_sensitivity": {
             "interpretation": (
                 "Recomputed out-of-sample results with 5 and 10 additional basis points "

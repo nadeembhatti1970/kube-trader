@@ -262,8 +262,9 @@ def build_realized_trade_report(fills: list[dict]) -> dict:
         trades, lambda trade: trade["exit_order_type"] or "unknown",
     )
     config_keys = (
-        "app_version", "trading_mode", "strategy", "signal_fast_bars",
-        "signal_slow_bars", "signal_min_spread_pct", "signal_min_buy_rsi",
+        "app_version", "trading_mode", "strategy_pool", "strategy",
+        "signal_frequency", "signal_fast_bars", "signal_slow_bars",
+        "signal_min_spread_pct", "signal_min_buy_rsi",
         "stop_loss_pct", "take_profit_pct", "effective_stop_loss_pct",
         "effective_take_profit_pct", "swing_atr_period", "swing_atr_multiple",
         "core_stop_loss_pct", "intraday_flatten_minutes",

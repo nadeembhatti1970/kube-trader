@@ -69,12 +69,24 @@ def get_settings() -> Settings:
 
 def strategy_config(settings: Settings | None = None, event: dict | None = None) -> dict:
     current = settings or get_settings()
+    pool = (event or {}).get("pool", "intraday")
+    strategy_details = {
+        "intraday": ("sma-crossover-confirmed-v1", "minute", current.signal_fast_bars,
+                     current.signal_slow_bars),
+        "swing": ("swing-close-vs-sma20-v1", "daily", 1, 20),
+        "core": ("core-sma50-200-crossover-v1", "daily", 50, 200),
+    }
+    strategy, frequency, fast_bars, slow_bars = strategy_details.get(
+        pool, ("unknown", "unknown", current.signal_fast_bars, current.signal_slow_bars),
+    )
     result = {
         "app_version": current.app_version,
         "trading_mode": "paper" if current.alpaca_paper else "live",
-        "strategy": "sma-crossover-confirmed-v1",
-        "signal_fast_bars": current.signal_fast_bars,
-        "signal_slow_bars": current.signal_slow_bars,
+        "strategy_pool": pool,
+        "strategy": strategy,
+        "signal_frequency": frequency,
+        "signal_fast_bars": fast_bars,
+        "signal_slow_bars": slow_bars,
         "signal_min_spread_pct": current.signal_min_spread_pct,
         "signal_min_buy_rsi": current.signal_min_buy_rsi,
         "stop_loss_pct": current.stop_loss_pct,
@@ -105,7 +117,8 @@ def strategy_config(settings: Settings | None = None, event: dict | None = None)
         signal_values = {
             key: event[key]
             for key in ("fast_sma", "slow_sma", "rsi_14", "daily_trend",
-                        "strategy_bar_date", "stop_loss_pct", "take_profit_pct")
+                        "strategy_bar_date", "signal_price", "signal_reference_sma",
+                        "atr_fraction", "stop_loss_pct", "take_profit_pct")
             if event.get(key) is not None
         }
         if signal_values:

@@ -2,7 +2,9 @@ import unittest
 from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo
 
-from app.research import evaluate_ohlc_walk_forward, positions_for, simulate_ohlc
+from app.research import (
+    _simulation_summary, evaluate_ohlc_walk_forward, positions_for, simulate_ohlc,
+)
 
 
 class WalkForwardResearchTests(unittest.TestCase):
@@ -64,6 +66,30 @@ class WalkForwardResearchTests(unittest.TestCase):
             scenarios[1]["out_of_sample"]["total_return"],
             scenarios[0]["out_of_sample"]["total_return"],
         )
+        windows = result["out_of_sample_subperiods"]["windows"]
+        self.assertEqual(len(windows), 3)
+        self.assertEqual(windows[0]["start_index"], int(len(bars) * 0.7))
+        self.assertEqual(windows[-1]["end_index_exclusive"], len(bars))
+        self.assertEqual(
+            sum(window["bars"] for window in windows),
+            len(bars) - int(len(bars) * 0.7),
+        )
+
+    def test_simulation_summary_reports_net_payoff_metrics(self):
+        summary = _simulation_summary(
+            [0.01, -0.01], [0.0, 0.0],
+            [
+                {"net_return_pct": 2.0, "exit_reason": "target"},
+                {"net_return_pct": -1.0, "exit_reason": "stop"},
+                {"net_return_pct": -1.0, "exit_reason": "market"},
+            ],
+            252,
+        )
+
+        self.assertEqual(summary["average_net_win_return_pct"], 2.0)
+        self.assertEqual(summary["average_net_loss_return_pct"], -1.0)
+        self.assertEqual(summary["net_profit_factor"], 1.0)
+        self.assertEqual(summary["average_net_trade_return_pct"], 0.0)
 
     def test_cost_sensitivity_skips_scenarios_above_simulator_limit(self):
         result = evaluate_ohlc_walk_forward(

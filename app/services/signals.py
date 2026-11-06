@@ -95,6 +95,18 @@ def daily_signals(symbol: str, price: float, timestamp: str) -> list[dict]:
         try:
             previous, current, atr_fraction = daily_strategy_state(bars, pool)
             bar_date = date.fromisoformat(bars[-1]["time"])
+            closes = [float(bar["close"]) for bar in bars]
+            if pool == "swing":
+                signal_values = {
+                    "signal_price": closes[-1],
+                    "signal_reference_sma": sum(closes[-20:]) / 20,
+                    "atr_fraction": atr_fraction,
+                }
+            else:
+                signal_values = {
+                    "fast_sma": sum(closes[-50:]) / 50,
+                    "slow_sma": sum(closes[-200:]) / 200,
+                }
             state = horizon_strategy_state(symbol, pool)
             if state and state["last_bar_date"] >= bar_date:
                 continue
@@ -112,6 +124,7 @@ def daily_signals(symbol: str, price: float, timestamp: str) -> list[dict]:
                 "pool": pool, "price": price, "stop_loss_pct": stop_loss_pct,
                 "daily_trend": "above" if current else "below",
                 "strategy_bar_date": bar_date.isoformat(), "ts": timestamp,
+                **signal_values,
             })
         except (ValueError, IndexError):
             # Inadequate history is normal while a new symbol is warming up.
@@ -170,4 +183,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-
