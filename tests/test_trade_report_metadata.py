@@ -26,6 +26,46 @@ class TradeReportMetadataTests(unittest.TestCase):
         self.assertIn("new orders only", metadata["note"])
         self.assertIn("managed ledger", metadata["note"])
 
+    def test_report_includes_fee_estimate_latency_coverage_and_benchmark(self):
+        with patch.object(main, "managed_fills", return_value=[]), \
+                patch.object(main, "latest_account_snapshot", return_value=None), \
+                patch.object(main, "account_fee_activities", return_value=[
+                    {"activity_date": "2026-11-06", "amount": -1.0}]), \
+                patch.object(main, "minute_bar_coverage", return_value={
+                    "all_sessions_meet_threshold": True}), \
+                patch.object(main, "benchmark_return", return_value={
+                    "symbol": "SPY", "return_pct": 1.0}):
+            report = main.trade_report(limit=100)
+
+        self.assertEqual(
+            report["fee_estimate"]["basis"],
+            "account_fee_activity_prorated_by_exit_notional_utc_day",
+        )
+        self.assertIn("entry", report["execution_latency"])
+        self.assertTrue(report["bar_coverage"]["all_sessions_meet_threshold"])
+        self.assertEqual(report["benchmark"]["symbol"], "SPY")
+        self.assertEqual(report["report_metadata"]["alpaca_data_feed"],
+                         main.settings.alpaca_data_feed)
+        self.assertEqual(
+            report["report_metadata"]["execution_latency_warn_seconds"],
+            main.settings.execution_latency_warn_seconds,
+        )
+
+    def test_adopt_endpoint_requires_a_current_position(self):
+        snapshot = {"positions": [{"symbol": "COST"}]}
+        client = TestClient(main.app)
+        with patch.object(main, "latest_account_snapshot", return_value=snapshot), \
+                patch.object(main, "save_position_assignment") as save:
+            adopted = client.post("/admin/positions/cost/adopt", params={"pool": "core"})
+            missing = client.post("/admin/positions/JNJ/adopt", params={"pool": "core"})
+            invalid = client.post("/admin/positions/COST/adopt", params={"pool": "everything"})
+
+        self.assertEqual(adopted.status_code, 200)
+        self.assertEqual(adopted.json()["pool"], "core")
+        save.assert_called_once_with("COST", "core", None)
+        self.assertEqual(missing.status_code, 404)
+        self.assertEqual(invalid.status_code, 400)
+
     def test_strategy_provenance_records_effective_risk_controls(self):
         configured = Settings(
             _env_file=None,

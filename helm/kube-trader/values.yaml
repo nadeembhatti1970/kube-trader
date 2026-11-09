@@ -29,6 +29,10 @@ config:
   extendedHoursSampleSeconds: "300"
   intradayFlattenMinutes: "10"
   intradayEntryCutoffMinutes: "30"
+  intradayEntryStartMinutes: "5"
+  intradayDailyLossLimitPct: "0.005"
+  maxEntriesPer5min: "3"
+  maxPortfolioOpenRiskPct: "0.02"
   symbolLossCooldownSeconds: "1800"
   symbolDailyLossLimit: "50"
   maxSectorExposurePct: "0.25"
@@ -53,6 +57,7 @@ config:
   alpacaActivitySyncSeconds: "300"
   alpacaActivityLookbackDays: "30"
   maxSignalAgeSeconds: "180"
+  executionLatencyWarnSeconds: "30"
 persistence:
   enabled: true
   size: 2Gi

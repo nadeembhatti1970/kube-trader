@@ -36,6 +36,10 @@ def init_db():
             );
             ALTER TABLE backtest_metrics ADD COLUMN IF NOT EXISTS model_config JSONB
               NOT NULL DEFAULT '{}';
+            CREATE TABLE IF NOT EXISTS position_assignments (
+              symbol TEXT PRIMARY KEY, pool TEXT NOT NULL, note TEXT,
+              assigned_at TIMESTAMPTZ NOT NULL DEFAULT now()
+            );
             CREATE TABLE IF NOT EXISTS risk_state (
               id BOOLEAN PRIMARY KEY DEFAULT TRUE CHECK (id), session_date DATE NOT NULL,
               starting_equity DOUBLE PRECISION NOT NULL, halted BOOLEAN NOT NULL DEFAULT FALSE,
@@ -150,6 +154,63 @@ def recent_bars(symbol: str, limit: int) -> list[dict]:
             (symbol, limit),
         ).fetchall()
     return list(reversed(rows))
+
+
+def minute_bar_coverage(days: int = 7, expected_bars: int = 390,
+                        minimum_pct: float = 80.0, limit: int = 20) -> dict:
+    """Regular-session minute-bar completeness per symbol and session.
+
+    A thin feed such as IEX can omit minutes, which silently stretches an
+    SMA measured in bars over more wall-clock time than the configuration implies.
+    """
+    if days < 1:
+        raise ValueError("days must be at least 1")
+    if expected_bars < 1:
+        raise ValueError("expected_bars must be at least 1")
+    with connect() as db:
+        rows = db.execute("""
+          SELECT symbol,
+                 (ts AT TIME ZONE 'America/New_York')::date AS session_date,
+                 count(*) AS bars
+          FROM bars
+          WHERE ts >= now() - make_interval(days => %s)
+          GROUP BY 1, 2
+        """, (days,)).fetchall()
+    sessions = []
+    for row in rows:
+        session_date = row["session_date"]
+        if session_date.weekday() >= 5:
+            continue
+        coverage = round(100.0 * float(row["bars"]) / expected_bars, 1)
+        sessions.append({
+            "symbol": row["symbol"],
+            "session_date": (session_date.isoformat()
+                             if hasattr(session_date, "isoformat") else str(session_date)),
+            "bars": int(row["bars"]),
+            "coverage_pct": coverage,
+        })
+    coverages = sorted(item["coverage_pct"] for item in sessions)
+    below = sorted(
+        (item for item in sessions if item["coverage_pct"] < minimum_pct),
+        key=lambda item: (item["coverage_pct"], item["symbol"], item["session_date"]),
+    )
+    median = None
+    if coverages:
+        middle = len(coverages) // 2
+        median = (coverages[middle] if len(coverages) % 2
+                  else round((coverages[middle - 1] + coverages[middle]) / 2, 1))
+    return {
+        "window_days": days,
+        "expected_regular_session_bars": expected_bars,
+        "minimum_coverage_pct": minimum_pct,
+        "symbol_sessions_observed": len(sessions),
+        "symbols_observed": len({item["symbol"] for item in sessions}),
+        "median_coverage_pct": median,
+        "lowest_coverage_pct": coverages[0] if coverages else None,
+        "sessions_below_threshold": len(below),
+        "all_sessions_meet_threshold": not below,
+        "below_threshold": below[:limit],
+    }
 
 
 def strategy_is_above(symbol: str) -> bool:
@@ -575,6 +636,36 @@ def latest_broker_activities(limit: int = 500) -> list[dict]:
         """, (limit,)).fetchall()
 
 
+def account_fee_activities(lookback_days: int = 90) -> list[dict]:
+    """Account-level fees grouped by UTC date.
+
+    Alpaca reports regulatory fees as account activities without an order_id, so they
+    cannot be attributed to an individual order. Reporting may allocate them pro-rata
+    with an explicit estimate label, but they are never treated as per-order facts.
+    """
+    if lookback_days < 1:
+        raise ValueError("lookback_days must be at least 1")
+    with connect() as db:
+        rows = db.execute("""
+          SELECT (activity_at AT TIME ZONE 'UTC')::date AS activity_date,
+                 SUM(net_amount) AS amount, COUNT(*) AS activities
+          FROM broker_activities
+          WHERE activity_type = 'FEE' AND net_amount IS NOT NULL
+            AND activity_at >= now() - make_interval(days => %s)
+          GROUP BY 1 ORDER BY 1
+        """, (lookback_days,)).fetchall()
+    result = []
+    for row in rows:
+        activity_date = row["activity_date"]
+        result.append({
+            "activity_date": (activity_date.isoformat()
+                              if hasattr(activity_date, "isoformat") else str(activity_date)),
+            "amount": float(row["amount"] or 0.0),
+            "activities": int(row["activities"] or 0),
+        })
+    return result
+
+
 def managed_symbols() -> set[str]:
     """Symbols with a net open filled quantity or a live unfilled entry; closed ones are excluded.
 
@@ -597,15 +688,66 @@ def managed_symbols() -> set[str]:
         row["symbol"] for row in pending}
 
 
+def position_assignments() -> dict[str, str]:
+    """Explicit operator pool assignments; they outrank order-history inference."""
+    with connect() as db:
+        rows = db.execute("""
+          SELECT symbol, pool FROM position_assignments ORDER BY symbol
+        """).fetchall()
+    return {row["symbol"]: row["pool"] for row in rows}
+
+
+def save_position_assignment(symbol: str, pool: str, note: str | None = None):
+    with connect() as db:
+        db.execute("""
+          INSERT INTO position_assignments(symbol, pool, note) VALUES (%s, %s, %s)
+          ON CONFLICT(symbol) DO UPDATE SET pool=excluded.pool, note=excluded.note,
+            assigned_at=now()
+        """, (symbol, pool, note))
+
+
 def managed_pool_assignments() -> dict[str, str]:
     with connect() as db:
         rows = db.execute("""
-          SELECT DISTINCT ON (symbol) symbol, pool FROM orders
-          WHERE side='buy'
-            AND status IN ('accepted','filled','new','partially_filled','pending_new')
-          ORDER BY symbol, created_at DESC
+          SELECT DISTINCT ON (symbol) symbol, pool FROM (
+            SELECT symbol, pool, 1 AS priority, assigned_at AS decided_at
+            FROM position_assignments
+            UNION ALL
+            SELECT symbol, pool, 0 AS priority, created_at AS decided_at
+            FROM orders
+            WHERE side='buy'
+              AND status IN ('accepted','filled','new','partially_filled','pending_new')
+          ) candidates
+          ORDER BY symbol, priority DESC, decided_at DESC
         """).fetchall()
     return {row["symbol"]: row["pool"] for row in rows}
+
+
+def bot_origin_symbols() -> set[str]:
+    """Symbols the bot has recorded an order for, used to flag unmanaged bot positions."""
+    with connect() as db:
+        rows = db.execute("""
+          SELECT DISTINCT symbol FROM orders
+          WHERE client_order_id LIKE 'kt-%' AND symbol IS NOT NULL
+          UNION
+          SELECT DISTINCT symbol FROM broker_order_metadata
+          WHERE client_order_id LIKE 'kt-%' AND symbol IS NOT NULL
+        """).fetchall()
+    return {row["symbol"] for row in rows}
+
+
+def entry_count_since(seconds: int) -> int:
+    """New buy reservations created within the window, used for burst-entry caps."""
+    if seconds < 1:
+        raise ValueError("seconds must be at least 1")
+    with connect() as db:
+        row = db.execute("""
+          SELECT count(*) AS entries FROM orders
+          WHERE side='buy' AND parent_broker_order_id IS NULL
+            AND status IN ('pending','accepted','filled','new','partially_filled','pending_new')
+            AND COALESCE(filled_at, submitted_at, created_at) >= now() - make_interval(secs => %s)
+        """, (seconds,)).fetchone()
+    return int(row["entries"]) if row else 0
 
 
 def managed_order_id(symbol: str, pool: str):

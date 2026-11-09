@@ -25,6 +25,10 @@ def _summarize(trades: list[dict]) -> dict:
         summary["gross_realized_pnl"] - summary["known_fees"]
         if summary["fees_complete"] else None
     )
+    estimates = [trade.get("estimated_net_realized_pnl") for trade in trades]
+    summary["estimated_net_realized_pnl"] = (
+        sum(estimates) if trades and all(value is not None for value in estimates) else None
+    )
     closed = summary["wins"] + summary["losses"]
     summary["win_rate_pct"] = summary["wins"] / closed * 100 if closed else None
     summary["average_holding_seconds"] = (
@@ -147,7 +151,148 @@ def reconcile_open_quantities(ledger_open: list[dict], broker_positions: list[di
     return {"discrepancies": discrepancies, "open_quantities": adjusted}
 
 
-def build_realized_trade_report(fills: list[dict]) -> dict:
+def classify_exit_reason(fill: dict) -> str:
+    """Label how a closing fill was produced from the order and signal metadata."""
+    signal_id = str(fill.get("signal_id") or "")
+    order_type = str(fill.get("order_type") or "").lower()
+    client_order_id = str(fill.get("client_order_id") or "")
+    if signal_id == "eod-flatten":
+        return "eod_flatten"
+    if "stop" in order_type:
+        return "stop_repair" if client_order_id.startswith("kt-protect-") else "stop"
+    if order_type in {"limit", "take_profit"}:
+        return "take_profit"
+    if signal_id:
+        return "signal"
+    return "unknown"
+
+
+def _utc_day(value) -> str | None:
+    if value is None:
+        return None
+    if isinstance(value, str):
+        value = datetime.fromisoformat(value)
+    if value.tzinfo is None:
+        value = value.replace(tzinfo=timezone.utc)
+    return value.astimezone(timezone.utc).date().isoformat()
+
+
+def allocate_account_fees(trades: list[dict], account_fees: list[dict] | None) -> dict:
+    """Spread account-level fee amounts over exit-day slices by exit notional.
+
+    Alpaca reports regulatory fees per account day, not per order. This produces an
+    explicitly estimated net figure; it never populates the strict per-order ``fees``
+    field or ``net_realized_pnl``.
+    """
+    fees_by_day: dict[str, float] = {}
+    for row in account_fees or []:
+        day = str(row.get("activity_date") or "")[:10]
+        if not day:
+            continue
+        fees_by_day[day] = fees_by_day.get(day, 0.0) + abs(float(row.get("amount") or 0.0))
+
+    groups: dict[str, list[dict]] = defaultdict(list)
+    for trade in trades:
+        trade["estimated_fees"] = None
+        trade["estimated_net_realized_pnl"] = None
+        day = _utc_day(trade.get("exit_filled_at"))
+        if day is None or trade.get("exit_fill_price") is None:
+            continue
+        groups[day].append(trade)
+
+    allocated_days: list[str] = []
+    missing_days: list[str] = []
+    allocated_total = 0.0
+    unallocated_total = 0.0
+    for day, day_trades in sorted(groups.items()):
+        notional = sum(trade["quantity"] * trade["exit_fill_price"] for trade in day_trades)
+        fee = fees_by_day.get(day)
+        if fee is None or notional <= 0:
+            missing_days.append(day)
+            continue
+        allocated_days.append(day)
+        for trade in day_trades:
+            share = fee * (trade["quantity"] * trade["exit_fill_price"]) / notional
+            trade["estimated_fees"] = share
+            trade["estimated_net_realized_pnl"] = trade["gross_realized_pnl"] - share
+            allocated_total += share
+    for day, fee in fees_by_day.items():
+        if day not in groups:
+            unallocated_total += fee
+
+    available = bool(allocated_days)
+    return {
+        "available": available,
+        "basis": "account_fee_activity_prorated_by_exit_notional_utc_day",
+        "estimate": True,
+        "note": (
+            "Alpaca FEE activities are account-level and carry no order_id. Amounts are "
+            "allocated pro-rata across that UTC day's closed exit notional and are an "
+            "estimate, not per-order fee facts. Strict per-order fees remain unchanged."
+        ),
+        "fee_days_with_trades": len(groups),
+        "fee_days_allocated": len(allocated_days),
+        "days_missing_fee_activity": missing_days,
+        "allocated_amount": allocated_total,
+        "unallocated_amount": unallocated_total,
+    }
+
+
+def _percentile(values: list[float], fraction: float) -> float | None:
+    ordered = sorted(values)
+    if not ordered:
+        return None
+    index = min(len(ordered) - 1, max(0, int(round(fraction * (len(ordered) - 1)))))
+    return ordered[index]
+
+
+def execution_latency(trades: list[dict], warn_seconds: float = 30.0) -> dict:
+    """Signal-to-fill delay percentiles; slow execution changes the strategy's behavior."""
+
+    def summary(key: str) -> dict:
+        values = [trade[key] for trade in trades if trade.get(key) is not None]
+        if not values:
+            return {"count": 0, "p50_seconds": None, "p90_seconds": None,
+                    "max_seconds": None, "over_warn_pct": None}
+        over = sum(1 for value in values if value > warn_seconds)
+        return {
+            "count": len(values),
+            "p50_seconds": round(_percentile(values, 0.5), 1),
+            "p90_seconds": round(_percentile(values, 0.9), 1),
+            "max_seconds": round(max(values), 1),
+            "over_warn_pct": round(over / len(values) * 100, 1),
+        }
+
+    return {
+        "warn_seconds": warn_seconds,
+        "entry": summary("entry_signal_to_fill_seconds"),
+        "exit": summary("exit_signal_to_fill_seconds"),
+    }
+
+
+def pool_session_realized(trades: list[dict], pool: str, session_date, tz) -> float:
+    """Realized gross P&L for one pool in the current exchange session."""
+    total = 0.0
+    for trade in trades:
+        if trade.get("pool") != pool:
+            continue
+        pnl = trade.get("gross_realized_pnl")
+        exit_at = trade.get("exit_filled_at")
+        if pnl is None or exit_at is None:
+            continue
+        if isinstance(exit_at, str):
+            exit_at = datetime.fromisoformat(exit_at)
+        if exit_at.tzinfo is None:
+            exit_at = exit_at.replace(tzinfo=timezone.utc)
+        if exit_at.astimezone(tz).date() != session_date:
+            continue
+        total += pnl
+    return total
+
+
+def build_realized_trade_report(fills: list[dict], account_fees: list[dict] | None = None,
+                                latency_warn_seconds: float = 30.0,
+                                bar_coverage: dict | None = None) -> dict:
     """Match managed buy/sell fills FIFO and report realized execution metrics."""
     inventory = defaultdict(deque)
     trades = []
@@ -240,6 +385,7 @@ def build_realized_trade_report(fills: list[dict]) -> dict:
                 ),
                 "entry_order_type": entry_fill.get("order_type"),
                 "exit_order_type": fill.get("order_type"),
+                "exit_reason": classify_exit_reason(fill),
                 "entry_strategy_config": entry_fill.get("strategy_config"),
                 "exit_strategy_config": fill.get("strategy_config"),
                 "entry_reference_price": entry_reference,
@@ -271,8 +417,10 @@ def build_realized_trade_report(fills: list[dict]) -> dict:
                 "filled_at": fill.get("filled_at"),
             })
 
+    fee_estimate = allocate_account_fees(trades, account_fees)
     summary_by_pool = _grouped_summary(trades, lambda trade: trade["pool"])
     summary_by_symbol = _grouped_summary(trades, lambda trade: trade["symbol"])
+    summary_by_exit_reason = _grouped_summary(trades, lambda trade: trade["exit_reason"])
     summary_by_strategy = _grouped_summary(
         trades,
         lambda trade: (
@@ -348,12 +496,24 @@ def build_realized_trade_report(fills: list[dict]) -> dict:
         "summary_by_symbol": summary_by_symbol,
         "summary_by_entry_order_type": summary_by_entry_order_type,
         "summary_by_exit_order_type": summary_by_exit_order_type,
+        "summary_by_exit_reason": summary_by_exit_reason,
         "summary_by_entry_config": summary_by_entry_config,
         "summary_by_entry_version": summary_by_entry_version,
         "entry_month_version_cohorts": _entry_cohorts(trades),
         "summary_by_strategy_symbol_order_type": summary_by_strategy_symbol_order_type,
         "fees_complete": bool(trades) and all(trade["fees"] is not None for trade in trades),
-        "profitability_evidence": _profitability_evidence(trades),
+        "profitability_evidence": {
+            **_profitability_evidence(trades),
+            "estimated_net_available": fee_estimate["available"],
+            "estimate_note": (
+                "net_pnl_measurable requires per-order fees on both sides of every slice. "
+                "estimated_net_available means account-level FEE activities were allocated "
+                "pro-rata and the estimate is labelled as such."
+            ),
+        },
+        "fee_estimate": fee_estimate,
+        "execution_latency": execution_latency(trades, latency_warn_seconds),
+        "bar_coverage": bar_coverage,
         "open_managed_quantities": open_positions,
         "unmatched_exit_fills": unmatched_exits,
         "data_quality": {

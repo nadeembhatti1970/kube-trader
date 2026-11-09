@@ -3,7 +3,7 @@
 ## Metadata
 
 - **Name:** `kube-trader-pipeline`
-- **Version:** 2.0.0
+- **Version:** 2.1.0
 - **Target:** Docker Compose or Kubernetes/Helm deployment
 - **Purpose:** Describe how the implemented data, signal, backtest, paper/live execution, allocation, reconciliation, and circuit-breaker workers operate.
 
@@ -34,6 +34,11 @@ Alpaca's `StockDataStream` supplies minute bars. The configured feed defaults to
 | `STOP_MANAGEMENT_ENABLED` | `false` | Repairs missing stops on bot-managed positions |
 | `ALPACA_DATA_FEED` | `iex` | Alpaca stock stream feed, `iex` or `sip` |
 | `MAX_TRADE_RISK_PCT` | `0.01` | Requested risk budget, capped in code at 1% of equity |
+| `MAX_PORTFOLIO_OPEN_RISK_PCT` | `0.02` | Cap on summed stop-risk across managed open positions; `0` disables |
+| `MAX_ENTRIES_PER_5MIN` | `3` | Rolling five-minute cap on new orders; `0` disables |
+| `INTRADAY_ENTRY_START_MINUTES` | `5` | Minutes after the open before intraday entries are allowed |
+| `INTRADAY_DAILY_LOSS_LIMIT_PCT` | `0.005` | Session realized-loss halt for new intraday entries |
+| `EXECUTION_LATENCY_WARN_SECONDS` | `30` | Signal-to-fill and reconciliation delay that triggers a warning log |
 | `STOP_LOSS_PCT` / `TAKE_PROFIT_PCT` | `0.02` / `0.04` | Default bracket distances |
 | `DAILY_DRAWDOWN_LIMIT_PCT` | `0.03` | Session loss threshold for new-entry halt |
 | `INTRADAY_ALLOCATION_PCT` | `0.20` | Intraday virtual pool target |
@@ -66,17 +71,20 @@ For intraday signals, the worker reads recent minute closes from PostgreSQL, com
 
 For daily strategies, it fetches daily bars using `MARKET_DATA_PROVIDER`, excludes the current unfinished session bar, and caches the result during the New York trading date. Swing enters on a completed close crossing above the 20-day SMA and exits on a cross below; its protective stop defaults to 2x 14-day ATR. Core enters when the 50-day SMA crosses above the 200-day SMA and exits on the reverse cross; its protective stop defaults to 20%. Daily crossover state is persisted per symbol/pool/bar date, so repeated minute events do not duplicate daily signals. RSI remains informational and does not filter orders.
 
-The backtesting worker recalculates only the intraday SMA simulation over up to 500 recent minute bars whenever a new bar arrives. `/research/backtests/{symbol}` separately compares all three rules, applies a configurable per-side cost estimate, and reports a chronological in-sample/out-of-sample split plus buy-and-hold comparison. The research endpoint uses up to 50,000 locally collected minute bars for intraday and up to the requested daily history for swing/core. Signals are assumed filled at bar close; minute Sharpe annualization is approximate. Results omit market impact, taxes, historical universe membership, and corporate-action timing and must not be treated as expected performance.
+The backtesting worker recalculates only the intraday SMA simulation over up to 500 recent minute bars whenever a new bar arrives. `/research/backtests/{symbol}` separately compares all three rules, applies a configurable per-side cost estimate, and reports a chronological in-sample/out-of-sample split plus buy-and-hold comparison. The research endpoint uses up to 50,000 locally collected minute bars for intraday and up to the requested daily history for swing/core. Signals fill at the next bar open and protective exits fill at the stop or target price (or the open on a gap); minute Sharpe annualization is approximate. Results omit market impact, taxes, historical universe membership, and corporate-action timing and must not be treated as expected performance.
 
 The ingestion worker downloads the configured ETF issuer XLSX holdings at startup and every `UNIVERSE_REFRESH_SECONDS` (24 hours by default), screens holdings by minimum price and 20-day average dollar volume, then subscribes to the most liquid eligible symbols up to `MAX_WATCHLIST_SYMBOLS`. It retains active subscriptions when a scheduled refresh fails. This is limited to one fund's published constituents, not all exchange listings. `/universe` reports the latest screen. New entries are limited by pool budgets, buying power, `MAX_OPEN_POSITIONS`, `MAX_SYMBOL_EXPOSURE_PCT`, and `MAX_SECTOR_EXPOSURE_PCT`; existing untracked positions count toward symbol/sector exposure. Custom symbols without a `SYMBOL_SECTORS` mapping are grouped under `unclassified`.
 
 ## Allocation and order sizing
 
-Each pool's target equity is `account_equity * target_ratio`. Broker position market values are assigned to their recorded bot pool; untracked account positions are conservatively counted against core exposure. Entry size is the lowest whole-share count allowed by:
+Each pool's target equity is `account_equity * target_ratio`. Broker position market values are assigned to their recorded bot pool; untracked account positions are conservatively counted against core exposure. An explicit operator assignment (`position_assignments`, created by `POST /admin/positions/{symbol}/adopt`) outranks order-history inference. Entry size is the lowest whole-share count allowed by:
 
 1. `account_equity * min(MAX_TRADE_RISK_PCT, 1%) / (signal_price * stop_loss_fraction)`;
-2. the pool's remaining target budget and broker buying power; and
-3. a 100-share per-order ceiling.
+2. the pool's remaining target budget and broker buying power;
+3. a 100-share per-order ceiling; and
+4. remaining room under `MAX_PORTFOLIO_OPEN_RISK_PCT`, which caps summed stop-risk across managed open positions.
+
+Entries are also gated by `MAX_ENTRIES_PER_5MIN` (rolling burst cap), `INTRADAY_ENTRY_START_MINUTES`, `INTRADAY_ENTRY_CUTOFF_MINUTES`, and `INTRADAY_DAILY_LOSS_LIMIT_PCT`. The last one pauses intraday entries for the session once that pool's realized loss reaches the configured share of equity; the account-wide `DAILY_DRAWDOWN_LIMIT_PCT` breaker is unchanged.
 
 All three pools generate signals. Intraday entries use day bracket orders with default 2% stop and 4% take-profit. Swing and core entries use GTC OTO orders with a single protective stop and no fixed take-profit; their daily trend exits close the bot-managed pool position after canceling its attached exit order. The 20/30/50 pool balances are virtual limits inside one brokerage account: the application does not transfer cash between accounts or automatically sell holdings to rebalance pool ratios.
 
@@ -84,7 +92,7 @@ Intraday buy signals submit long-only Alpaca market bracket orders on the select
 
 ## Reconciliation and circuit breaker
 
-Every reconciliation reads Alpaca account equity, buying power, positions, and open nested orders. It stores account snapshots, reports untracked/missing positions and pool exposures, and identifies absent protective stops. Alpaca is the source of truth: it also reports ledger-vs-broker quantity discrepancies, pools over target, and unclassified-sector symbols as `warnings` without altering the ledger. With `STOP_MANAGEMENT_ENABLED=true`, it submits a protective stop for a bot-managed position missing an open stop order.
+Every reconciliation reads Alpaca account equity, buying power, positions, and open nested orders. It stores account snapshots, reports untracked/missing positions, `unmanaged_bot_origin_positions`, pool exposures, and `open_risk`/`open_risk_pct`, and identifies absent protective stops. Alpaca is the source of truth: it also reports ledger-vs-broker quantity discrepancies, pools over target, and unclassified-sector symbols as `warnings` without altering the ledger. With `STOP_MANAGEMENT_ENABLED=true`, it submits a protective stop for a bot-managed position missing an open stop order, using the pool's own default distance (core `CORE_STOP_LOSS_PCT`, otherwise `STOP_LOSS_PCT`) and never tightening an existing stop. Bot-created positions without pool provenance are reported, never adopted automatically, and are not flattened or trend-exited until an operator assigns them a pool.
 
 The daily baseline uses Alpaca's same-day 1-minute portfolio history during market hours. If unavailable, it falls back to `account.last_equity` (previous close) or current equity. At a drawdown equal to or greater than `DAILY_DRAWDOWN_LIMIT_PCT`, the worker persists the halt for the current New York date and blocks new automated entries. It emits a critical log and, when configured, posts a JSON object containing severity, service, alert name, message, and timestamp to `ALERT_WEBHOOK_URL`. The state resets on the next New York calendar date after a new reconciliation.
 
@@ -95,8 +103,10 @@ The breaker does not terminate a pod, cancel bracket exits, or liquidate positio
 - `GET /healthz`: API process liveness.
 - `GET /readyz`: PostgreSQL connectivity.
 - `GET /backtests/{symbol}`: latest rolling metrics.
-- `GET /trades`: realized P&L with gross/net fee completeness, fill source, and attribution source; absent fee or strategy metadata stays unknown.
-- `GET /account/reconciliation`: latest account and allocation snapshot, including `ledger_discrepancies` and `warnings`. JSON GET responses are named `<endpoint>_<UTC timestamp>.json` via `Content-Disposition` (`attachment` only with `?download=true`; otherwise `inline`).
+- `GET /trades`: realized P&L with gross/net fee completeness, fill source, and attribution source; absent fee or strategy metadata stays unknown. Also returns `summary_by_exit_reason`, a pro-rata `fee_estimate` with per-slice `estimated_net_realized_pnl` (labelled estimated, never replacing strict per-order fees), `execution_latency` percentiles, `bar_coverage`, and an ETF `benchmark` return over the closed-trade window.
+- `GET /account/reconciliation`: latest account and allocation snapshot, including `ledger_discrepancies`, `open_risk`, `unmanaged_bot_origin_positions`, and `warnings`. JSON GET responses are named `<endpoint>_<UTC timestamp>.json` via `Content-Disposition` (`attachment` only with `?download=true`; otherwise `inline`).
 - `GET /risk`: current New York-date breaker state.
+
+- `POST /admin/positions/{symbol}/adopt?pool=intraday|swing|core`: assign a current broker position to a pool. It records provenance only and places, moves, or cancels nothing; the endpoint is unauthenticated, so keep the API internal.
 
 Use `docker compose up --build` for the local stack. Kubernetes manifests live in `k8s/`; the Helm chart is in `helm/kube-trader/`. The API is internal by default. Configure credentials matching the selected Alpaca endpoint, webhook secrets, persistent storage, and private network access before enabling the stream or execution switches. Set `ALPACA_PAPER=false` only when live trading is intended; `EXECUTION_ENABLED` remains false by default.

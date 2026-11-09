@@ -17,7 +17,8 @@ from alpaca.trading.requests import (GetOrderByIdRequest, GetOrdersRequest, Mark
 
 from app.alpaca_reporting import (fetch_account_activities, serialize_account,
                                  serialize_order, serialize_position)
-from app.database import (broker_activity_sync_status, fill_order_ids_missing_type,
+from app.database import (bot_origin_symbols, broker_activity_sync_status,
+                          entry_count_since, fill_order_ids_missing_type,
                           get_risk_state, init_db,
                           managed_fills, managed_order_id, managed_order_stop_loss_pct,
                           managed_order_roots, managed_orders, managed_pool_assignments,
@@ -29,7 +30,8 @@ from app.database import (broker_activity_sync_status, fill_order_ids_missing_ty
 from app.settings import get_settings, strategy_config
 from app.streams import SIGNAL_STREAM, client, ensure_group, read_group
 from app.trade_accounting import (build_realized_trade_report, reconcile_open_quantities,
-                                 minutes_to_close, symbol_entry_block)
+                                 minutes_to_close, pool_session_realized,
+                                 symbol_entry_block)
 from app.universe import sector_for_symbol
 
 logging.basicConfig(level=logging.INFO)
@@ -43,6 +45,32 @@ ACCOUNT_ACTIVITY_TYPES = ("FILL", "TRANS", "MISC", "FEE")
 def pool_weights():
     return {"intraday": settings.intraday_allocation_pct,
             "swing": settings.swing_allocation_pct, "core": settings.core_allocation_pct}
+
+
+def default_stop_loss_pct(pool: str) -> float:
+    """Stop distance used only when a managed entry recorded no stop of its own."""
+    if pool == "core":
+        return settings.core_stop_loss_pct
+    return settings.stop_loss_pct
+
+
+def minutes_since_open(now: datetime | None = None) -> float | None:
+    """Minutes since the regular NY open, or None at a weekend."""
+    local = now or datetime.now(NY)
+    if local.weekday() >= 5:
+        return None
+    open_at = local.replace(hour=9, minute=30, second=0, microsecond=0)
+    return (local - open_at).total_seconds() / 60
+
+
+def cap_entry_quantity(qty: int, price: float, stop_loss_pct: float, equity: float,
+                       open_risk: float, max_open_risk_pct: float) -> int:
+    """Keep the sum of stop-risk across open positions inside the portfolio cap."""
+    if max_open_risk_pct <= 0 or equity <= 0:
+        return qty
+    per_share_risk = max(price * stop_loss_pct, 0.01)
+    room = max(equity * max_open_risk_pct - max(open_risk, 0.0), 0.0)
+    return max(0, min(qty, math.floor(room / per_share_risk)))
 
 
 def order_tree(order):
@@ -381,12 +409,20 @@ def flatten_intraday_positions(client_api: TradingClient, positions) -> list[str
     if remaining is None or remaining > settings.intraday_flatten_minutes:
         return []
     pools = managed_pool_assignments()
+    known = None
     now = datetime.now(timezone.utc)
     event = {"ts": now.isoformat(), "price": None}
     closed = []
     for position in positions:
         symbol = position.symbol
         if pools.get(symbol) != "intraday":
+            if symbol not in pools:
+                if known is None:
+                    known = managed_symbols()
+                if symbol in known:
+                    log.warning(
+                        "Not flattening %s before the close: it is managed but has no "
+                        "recorded pool assignment", symbol)
             continue
         try:
             if close_managed_position(client_api, symbol, "intraday", positions,
@@ -438,8 +474,10 @@ def reconcile(client_api: TradingClient):
     if settings.stop_management_enabled:
         orphaned_stops = cancel_orphaned_protective_stops(client_api, orphaned_stops)
     pool_by_symbol = managed_pool_assignments()
+    known = managed_symbols()
     exposures = {pool: 0.0 for pool in POOL_WEIGHTS}
     sector_exposures = {}
+    open_risk = 0.0
     for position in positions:
         symbol = position.symbol
         qty = float(position.qty)
@@ -455,13 +493,18 @@ def reconcile(client_api: TradingClient):
         broker_positions.append(position_report)
         pool = pool_by_symbol.get(symbol, "core")
         exposures[pool] += abs(float(position.market_value))
+        if symbol in known and qty > 0:
+            risk_pct = managed_order_stop_loss_pct(symbol, pool)
+            if risk_pct is None:
+                risk_pct = default_stop_loss_pct(pool)
+            open_risk += qty * avg_entry * risk_pct
         sector = sector_for_symbol(symbol, settings)
         sector_exposures[sector] = sector_exposures.get(sector, 0.0) + abs(float(position.market_value))
         if (settings.stop_management_enabled and symbol in pool_by_symbol
                 and (symbol, close_side.value) not in protected):
             stop_pct = managed_order_stop_loss_pct(symbol, pool)
             if stop_pct is None:
-                stop_pct = settings.stop_loss_pct
+                stop_pct = default_stop_loss_pct(pool)
             stop_price = avg_entry * (1 - stop_pct if qty > 0 else 1 + stop_pct)
             client_order_id = "kt-protect-" + uuid.uuid4().hex[:24]
             try:
@@ -476,7 +519,6 @@ def reconcile(client_api: TradingClient):
                 stop_gaps.append({"symbol": symbol, "error": str(exc)})
                 log.exception("Unable to restore protective stop for %s", symbol)
 
-    known = managed_symbols()
     broker_symbols = {item["symbol"] for item in broker_positions}
     equity = float(account.equity)
     buying_power = float(account.buying_power)
@@ -518,12 +560,30 @@ def reconcile(client_api: TradingClient):
         warnings.append(
             "Bot protective stop orders are open for symbols with no broker position: "
             + symbols)
+    unmanaged_bot_origin = sorted(
+        (broker_symbols - known) & bot_origin_symbols()
+    )
+    if unmanaged_bot_origin:
+        warnings.append(
+            "Bot-created positions have no pool provenance and are not managed; review and "
+            "adopt explicitly with POST /admin/positions/{symbol}/adopt: "
+            + ", ".join(unmanaged_bot_origin))
+    open_risk_pct = open_risk / equity if equity else 0.0
+    if (settings.max_portfolio_open_risk_pct > 0
+            and open_risk_pct > settings.max_portfolio_open_risk_pct):
+        warnings.append(
+            f"Open stop-risk is {open_risk_pct:.2%} of equity, above the "
+            f"{settings.max_portfolio_open_risk_pct:.2%} cap; new entries are blocked")
     diffs = {"untracked_broker_positions": sorted(broker_symbols - known),
+             "unmanaged_bot_origin_positions": unmanaged_bot_origin,
              "managed_positions_missing_at_broker": sorted(known - broker_symbols),
              "positions_missing_protective_stop": stop_gaps,
              "orphaned_protective_stops": orphaned_stops,
              "ledger_discrepancies": ledger_check["discrepancies"],
              "unclassified_symbols": unclassified,
+             "open_risk": open_risk,
+             "open_risk_pct": open_risk_pct,
+             "max_portfolio_open_risk_pct": settings.max_portfolio_open_risk_pct,
              "warnings": warnings,
              "allocations": allocations, "sector_exposures": sector_exposures}
     for warning in warnings:
@@ -567,6 +627,7 @@ def reconcile(client_api: TradingClient):
     return (account, positions,
             {"halted": bool(state["halted"]), "drawdown": drawdown,
              "equity": equity, "buying_power": buying_power,
+             "open_risk": open_risk,
              "reconciliation": diffs},
             open_orders)
 
@@ -576,16 +637,34 @@ def place_entry(client_api: TradingClient, event: dict, signal_id: str,
     if event.get("action") != "buy" or risk["halted"]:
         return
     symbol = event["symbol"]
-    if not client_api.get_clock().is_open:
+    clock = client_api.get_clock()
+    if not clock.is_open:
         log.info("Ignoring %s entry because the US market is closed", symbol)
         return
     if any(position.symbol == symbol for position in positions):
         log.info("Ignoring entry for already-held symbol %s", symbol)
         return
-    if event.get("pool", "intraday") == "intraday" and settings.intraday_entry_cutoff_minutes > 0:
-        remaining = minutes_to_close(client_api.get_clock())
+    pool = event.get("pool", "intraday")
+    if pool not in POOL_WEIGHTS:
+        log.error("Unknown allocation pool %s; rejecting signal", pool)
+        return
+    session_now = datetime.now(NY)
+    if pool == "intraday" and settings.intraday_entry_start_minutes > 0:
+        elapsed = minutes_since_open(session_now)
+        if elapsed is not None and elapsed < settings.intraday_entry_start_minutes:
+            log.info("Ignoring intraday entry for %s: %.0f minutes since the open",
+                     symbol, elapsed)
+            return
+    if pool == "intraday" and settings.intraday_entry_cutoff_minutes > 0:
+        remaining = minutes_to_close(clock)
         if remaining is not None and remaining <= settings.intraday_entry_cutoff_minutes:
             log.info("Ignoring intraday entry for %s: %.0f minutes to close", symbol, remaining)
+            return
+    if settings.max_entries_per_5min > 0:
+        recent_entries = entry_count_since(300)
+        if recent_entries >= settings.max_entries_per_5min:
+            log.info("Ignoring entry for %s: %s entries already opened in the last 5 minutes",
+                     symbol, recent_entries)
             return
     if len(positions) >= settings.max_open_positions:
         log.info("Ignoring entry for %s because MAX_OPEN_POSITIONS is reached", symbol)
@@ -599,20 +678,32 @@ def place_entry(client_api: TradingClient, event: dict, signal_id: str,
            for order in open_orders for item in order_tree(order)):
         log.info("Ignoring entry for %s because an open buy order already exists", symbol)
         return
+    needs_trade_history = (
+        settings.symbol_loss_cooldown_seconds > 0
+        or settings.symbol_daily_loss_limit > 0
+        or (pool == "intraday" and settings.intraday_daily_loss_limit_pct > 0)
+    )
+    session_trades = build_realized_trade_report(managed_fills())["trades"] \
+        if needs_trade_history else []
     if settings.symbol_loss_cooldown_seconds > 0 or settings.symbol_daily_loss_limit > 0:
         now = datetime.now(NY)
         block = symbol_entry_block(
-            build_realized_trade_report(managed_fills())["trades"], symbol, now, now.date(),
+            session_trades, symbol, now, now.date(),
             settings.symbol_loss_cooldown_seconds, settings.symbol_daily_loss_limit, NY)
         if block:
             log.info("Ignoring entry: %s", block)
             return
+    if pool == "intraday" and settings.intraday_daily_loss_limit_pct > 0 and risk.get("equity"):
+        pool_loss = pool_session_realized(
+            session_trades, pool, session_now.date(), NY)
+        pool_limit = risk["equity"] * settings.intraday_daily_loss_limit_pct
+        if pool_loss <= -pool_limit:
+            log.warning(
+                "Ignoring entry for %s: intraday pool realized %.2f today, beyond the "
+                "%.2f session loss limit", symbol, pool_loss, -pool_limit)
+            return
     price = float(event["price"])
     if price <= 0:
-        return
-    pool = event.get("pool", "intraday")
-    if pool not in POOL_WEIGHTS:
-        log.error("Unknown allocation pool %s; rejecting signal", pool)
         return
     equity = risk["equity"]
     allocation = risk["reconciliation"]["allocations"][pool]
@@ -630,6 +721,10 @@ def place_entry(client_api: TradingClient, event: dict, signal_id: str,
     risk_budget = equity * min(settings.max_trade_risk_pct, 0.01)
     qty = min(math.floor(risk_budget / (price * stop_loss_pct)),
               math.floor(available / price), 100)
+    qty = cap_entry_quantity(
+        qty, price, stop_loss_pct, equity,
+        float(risk.get("open_risk") or 0.0), settings.max_portfolio_open_risk_pct,
+    )
     if qty < 1:
         log.info("Risk/allocation limits leave no whole shares for %s", symbol)
         return
@@ -807,6 +902,7 @@ def main():
     risk = {"halted": False}
     while True:
         if time.monotonic() - last_reconcile >= settings.reconcile_interval_seconds:
+            reconcile_started = time.monotonic()
             try:
                 _, positions, risk, open_orders = reconcile(client_api)
                 flatten_intraday_positions(client_api, positions)
@@ -814,6 +910,11 @@ def main():
             except Exception:
                 log.exception("Broker reconciliation failed; no entries will be processed")
                 risk = {"halted": True, "equity": 0.0, "buying_power": 0.0}
+            reconcile_seconds = time.monotonic() - reconcile_started
+            if reconcile_seconds > settings.execution_latency_warn_seconds:
+                log.warning(
+                    "Reconciliation took %.1fs; signal handling waits behind it",
+                    reconcile_seconds)
             last_reconcile = time.monotonic()
         if time.monotonic() - last_activity_sync >= settings.alpaca_activity_sync_seconds:
             try:
@@ -827,9 +928,15 @@ def main():
         for _, messages in batches:
             for message_id, fields in messages:
                 try:
+                    signal_started = time.monotonic()
                     handled = handle_signal(
                         client_api, json.loads(fields["data"]), message_id, risk,
                     )
+                    signal_seconds = time.monotonic() - signal_started
+                    if signal_seconds > settings.execution_latency_warn_seconds:
+                        log.warning(
+                            "Signal %s took %.1fs to handle; queued signals are delayed",
+                            message_id, signal_seconds)
                     if handled:
                         redis_client.xack(SIGNAL_STREAM, "execution-workers", message_id)
                 except Exception:

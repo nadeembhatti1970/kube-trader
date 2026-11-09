@@ -27,8 +27,11 @@ class Settings(BaseSettings):
     max_sector_exposure_pct: float = 0.25
     intraday_flatten_minutes: int = 0
     intraday_entry_cutoff_minutes: int = 0
+    intraday_entry_start_minutes: int = 5
+    intraday_daily_loss_limit_pct: float = 0.005
     symbol_loss_cooldown_seconds: int = 0
     symbol_daily_loss_limit: float = 0.0
+    max_entries_per_5min: int = 3
     execution_enabled: bool = False
     new_entries_enabled: bool = False
     stop_management_enabled: bool = False
@@ -36,6 +39,7 @@ class Settings(BaseSettings):
     extended_hours_sampling_enabled: bool = False
     extended_hours_sample_seconds: int = 300
     max_trade_risk_pct: float = 0.01
+    max_portfolio_open_risk_pct: float = 0.02
     daily_drawdown_limit_pct: float = 0.03
     stop_loss_pct: float = 0.02
     take_profit_pct: float = 0.04
@@ -57,6 +61,7 @@ class Settings(BaseSettings):
     alpaca_activity_lookback_days: int = 30
     reconcile_interval_seconds: int = 30
     max_signal_age_seconds: int = 180
+    execution_latency_warn_seconds: int = 30
     alert_webhook_url: str = ""
     log_level: str = "INFO"
     model_config = SettingsConfigDict(env_file=".env", extra="ignore")
@@ -96,9 +101,13 @@ def strategy_config(settings: Settings | None = None, event: dict | None = None)
         "core_stop_loss_pct": current.core_stop_loss_pct,
         "intraday_flatten_minutes": current.intraday_flatten_minutes,
         "intraday_entry_cutoff_minutes": current.intraday_entry_cutoff_minutes,
+        "intraday_entry_start_minutes": current.intraday_entry_start_minutes,
+        "intraday_daily_loss_limit_pct": current.intraday_daily_loss_limit_pct,
         "risk_controls": {
             "configured_max_trade_risk_pct": current.max_trade_risk_pct,
             "effective_max_trade_risk_pct": min(current.max_trade_risk_pct, 0.01),
+            "max_portfolio_open_risk_pct": current.max_portfolio_open_risk_pct,
+            "max_entries_per_5min": current.max_entries_per_5min,
             "daily_drawdown_limit_pct": current.daily_drawdown_limit_pct,
             "symbol_loss_cooldown_seconds": current.symbol_loss_cooldown_seconds,
             "symbol_daily_loss_limit": current.symbol_daily_loss_limit,

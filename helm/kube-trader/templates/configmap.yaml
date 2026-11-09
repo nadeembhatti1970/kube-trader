@@ -30,6 +30,7 @@ data:
   ALPACA_ACTIVITY_SYNC_SECONDS: {{ .Values.config.alpacaActivitySyncSeconds | quote }}
   ALPACA_ACTIVITY_LOOKBACK_DAYS: {{ .Values.config.alpacaActivityLookbackDays | quote }}
   MAX_SIGNAL_AGE_SECONDS: {{ .Values.config.maxSignalAgeSeconds | quote }}
+  EXECUTION_LATENCY_WARN_SECONDS: {{ .Values.config.executionLatencyWarnSeconds | quote }}
   DATABASE_PATH: /data/market.db
   ETF_HOLDINGS_SYMBOL: {{ .Values.config.etfHoldingsSymbol | quote }}
   ETF_HOLDINGS_URL: {{ .Values.config.etfHoldingsUrl | quote }}
@@ -45,6 +46,10 @@ data:
   EXTENDED_HOURS_SAMPLE_SECONDS: {{ .Values.config.extendedHoursSampleSeconds | quote }}
   INTRADAY_FLATTEN_MINUTES: {{ .Values.config.intradayFlattenMinutes | quote }}
   INTRADAY_ENTRY_CUTOFF_MINUTES: {{ .Values.config.intradayEntryCutoffMinutes | quote }}
+  INTRADAY_ENTRY_START_MINUTES: {{ .Values.config.intradayEntryStartMinutes | quote }}
+  INTRADAY_DAILY_LOSS_LIMIT_PCT: {{ .Values.config.intradayDailyLossLimitPct | quote }}
+  MAX_ENTRIES_PER_5MIN: {{ .Values.config.maxEntriesPer5min | quote }}
+  MAX_PORTFOLIO_OPEN_RISK_PCT: {{ .Values.config.maxPortfolioOpenRiskPct | quote }}
   SYMBOL_LOSS_COOLDOWN_SECONDS: {{ .Values.config.symbolLossCooldownSeconds | quote }}
   SYMBOL_DAILY_LOSS_LIMIT: {{ .Values.config.symbolDailyLossLimit | quote }}
   MAX_SYMBOL_EXPOSURE_PCT: {{ .Values.config.maxSymbolExposurePct | quote }}

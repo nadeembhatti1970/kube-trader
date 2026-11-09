@@ -4,9 +4,11 @@ from fastapi import FastAPI, HTTPException, Query, Request
 from pydantic import BaseModel
 
 from app.market_data import get_daily_bars
-from app.database import (connect, extended_hours_report, get_risk_state, latest_account_snapshot, latest_backtest,
+from app.database import (account_fee_activities, broker_activity_summary,
+                          broker_activity_sync_status, connect, extended_hours_report,
+                          get_risk_state, latest_account_snapshot, latest_backtest,
                           latest_broker_activities, latest_universe_snapshot, managed_fills,
-                          broker_activity_summary, broker_activity_sync_status, recent_bars)
+                          minute_bar_coverage, recent_bars, save_position_assignment)
 from app.export_names import export_filename
 from app.research import evaluate_ohlc_walk_forward
 from app.settings import get_settings, strategy_config
@@ -16,6 +18,54 @@ from app.trade_accounting import build_realized_trade_report, reconcile_open_qua
 settings = get_settings()
 app = FastAPI(title="Kube Trader", version=settings.app_version)
 SNAPSHOT_STALE_SECONDS = max(120, settings.reconcile_interval_seconds * 4)
+BENCHMARK_CACHE: dict[str, dict | None] = {}
+
+
+def benchmark_return(trades: list[dict]) -> dict | None:
+    """Close-to-close return of the ETF benchmark over the closed-trade window."""
+    stamps = []
+    for trade in trades:
+        for key in ("entry_filled_at", "exit_filled_at"):
+            value = trade.get(key)
+            if value is None:
+                continue
+            if isinstance(value, str):
+                value = datetime.fromisoformat(value)
+            if value.tzinfo is None:
+                value = value.replace(tzinfo=timezone.utc)
+            stamps.append(value)
+    if not stamps:
+        return None
+    start = min(stamps).date().isoformat()
+    end = max(stamps).date().isoformat()
+    symbol = (settings.etf_holdings_symbol or "SPY").upper()
+    cache_key = f"{symbol}:{start}:{end}:{settings.market_data_provider}"
+    if cache_key in BENCHMARK_CACHE:
+        return BENCHMARK_CACHE[cache_key]
+    result = None
+    try:
+        bars = get_daily_bars(symbol, 120, settings)
+        window = [bar for bar in bars if start <= str(bar["time"])[:10] <= end]
+        if len(window) >= 2:
+            first = float(window[0]["close"])
+            last = float(window[-1]["close"])
+            result = {
+                "symbol": symbol,
+                "source": settings.market_data_provider,
+                "start_date": str(window[0]["time"])[:10],
+                "end_date": str(window[-1]["time"])[:10],
+                "start_close": first,
+                "end_close": last,
+                "return_pct": (last / first - 1) * 100 if first else None,
+                "note": (
+                    "Close-to-close benchmark over the first and last closed-trade dates. "
+                    "It is a reference point, not a portfolio simulation."
+                ),
+            }
+    except Exception:
+        result = None
+    BENCHMARK_CACHE[cache_key] = result
+    return result
 
 
 @app.middleware("http")
@@ -276,11 +326,27 @@ def extended_hours_liquidity(days: int = Query(default=7, ge=1, le=30)):
 @app.get("/trades")
 def trade_report(limit: int = Query(default=100, ge=1, le=1000)):
     try:
-        report = build_realized_trade_report(managed_fills())
+        try:
+            account_fees = account_fee_activities()
+        except Exception:
+            account_fees = None
+        try:
+            bar_coverage = minute_bar_coverage()
+        except Exception:
+            bar_coverage = None
+        report = build_realized_trade_report(
+            managed_fills(),
+            account_fees=account_fees,
+            latency_warn_seconds=settings.execution_latency_warn_seconds,
+            bar_coverage=bar_coverage,
+        )
+        report["benchmark"] = benchmark_return(report["trades"])
         report["report_metadata"] = {
             "generated_at": datetime.now(timezone.utc).isoformat(),
             "app_version": settings.app_version,
             "trading_mode": "paper" if settings.alpaca_paper else "live",
+            "alpaca_data_feed": settings.alpaca_data_feed,
+            "execution_latency_warn_seconds": settings.execution_latency_warn_seconds,
             "current_strategy_config": strategy_config(settings),
             "note": (
                 "The current configuration applies to new orders only. Each trade also includes "
@@ -323,3 +389,40 @@ def risk_status():
         return result
     except Exception as exc:
         raise HTTPException(status_code=503, detail="Risk database is unavailable") from exc
+
+
+@app.post("/admin/positions/{symbol}/adopt")
+def adopt_position(symbol: str, pool: str = Query(...),
+                   note: str | None = Query(default=None)):
+    """Assign an existing broker position to a bot pool without placing any order.
+
+    This is how a bot-created position that lost its provenance becomes managed again;
+    it never adopts or alters unrelated holdings automatically.
+    """
+    if pool not in {"intraday", "swing", "core"}:
+        raise HTTPException(status_code=400, detail="pool must be intraday, swing, or core")
+    ticker = symbol.upper()
+    try:
+        snapshot = latest_account_snapshot()
+        if snapshot is None:
+            raise HTTPException(status_code=404,
+                                detail="No broker reconciliation has run yet")
+        held = {item["symbol"] for item in snapshot["positions"]}
+        if ticker not in held:
+            raise HTTPException(
+                status_code=404, detail=f"{ticker} is not a current broker position")
+        save_position_assignment(ticker, pool, note)
+        return {
+            "symbol": ticker,
+            "pool": pool,
+            "note": note,
+            "applies_to": (
+                "Reconciliation, stop repair, and end-of-day flattening from the next "
+                "cycle. No position, order, or stop is created, moved, or cancelled."
+            ),
+        }
+    except HTTPException:
+        raise
+    except Exception as exc:
+        raise HTTPException(status_code=503,
+                            detail="Position assignment store is unavailable") from exc
