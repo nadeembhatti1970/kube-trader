@@ -8,12 +8,16 @@ from app.database import (account_fee_activities, broker_activity_summary,
                           broker_activity_sync_status, connect, extended_hours_report,
                           get_risk_state, latest_account_snapshot, latest_backtest,
                           latest_broker_activities, latest_universe_snapshot, managed_fills,
-                          minute_bar_coverage, recent_bars, save_position_assignment)
+                          minute_bar_coverage, recent_bars, save_position_assignment,
+                          save_strategy_validation)
 from app.export_names import export_filename
+from app.portfolio_sim import simulate_portfolio
 from app.research import evaluate_ohlc_walk_forward
 from app.settings import get_settings, strategy_config
 from app.storage import store_bars
 from app.trade_accounting import build_realized_trade_report, reconcile_open_quantities
+from app.universe import sector_for_symbol
+from app.validation import validation_config_key, validation_verdict
 
 settings = get_settings()
 app = FastAPI(title="Kube Trader", version=settings.app_version)
@@ -242,6 +246,119 @@ def research_backtest(
         return report
     except Exception as exc:
         raise HTTPException(status_code=502, detail=f"Research backtest unavailable: {exc}") from exc
+
+
+@app.get("/research/portfolio")
+def research_portfolio(
+    days: int = Query(default=5000, ge=100, le=50000),
+    symbols: str | None = Query(default=None),
+    persist: bool = Query(default=False),
+    min_spread_pct: float | None = Query(default=None, ge=0),
+    min_buy_rsi: float | None = Query(default=None, ge=0, le=100),
+    fast_bars: int | None = Query(default=None, ge=1),
+    slow_bars: int | None = Query(default=None, ge=2),
+    cost_bps: float | None = Query(default=None, ge=0, le=100),
+    min_hold_minutes: float | None = Query(default=None, ge=0),
+    exit_confirmation_spread_pct: float | None = Query(default=None, ge=0),
+):
+    """Portfolio-level walk-forward research over the selected watchlist.
+
+    Applies the live capital, concentration, timing, and cost constraints to every
+    symbol at once and reports the uncertainty around the result. Nothing here
+    changes orders or settings.
+    """
+    if symbols:
+        requested = [item.strip().upper() for item in symbols.split(",") if item.strip()]
+    else:
+        requested = [item["symbol"] for item in latest_universe_snapshot()
+                     if item.get("selected")]
+    requested = requested[:settings.portfolio_backtest_max_symbols]
+    if not requested:
+        raise HTTPException(status_code=404,
+                            detail="No symbols selected; pass ?symbols= or run the universe screen")
+    try:
+        bars_by_symbol = {}
+        for symbol in requested:
+            rows = recent_bars(symbol, days)
+            if rows:
+                bars_by_symbol[symbol] = rows
+        if not bars_by_symbol:
+            raise HTTPException(status_code=404,
+                                detail="No stored minute bars for the requested symbols")
+        snapshot = latest_account_snapshot()
+        starting_equity = (float(snapshot["equity"]) if snapshot else 100_000.0)
+        config = {
+            "starting_equity": starting_equity,
+            "intraday_allocation_pct": settings.intraday_allocation_pct,
+            "fast_bars": settings.signal_fast_bars if fast_bars is None else fast_bars,
+            "slow_bars": settings.signal_slow_bars if slow_bars is None else slow_bars,
+            "min_spread_pct": (settings.signal_min_spread_pct
+                               if min_spread_pct is None else min_spread_pct),
+            "min_buy_rsi": (settings.signal_min_buy_rsi
+                            if min_buy_rsi is None else min_buy_rsi),
+            "stop_loss_pct": settings.stop_loss_pct,
+            "take_profit_pct": settings.take_profit_pct,
+            "cost_bps_per_side": (settings.backtest_cost_bps
+                                  if cost_bps is None else cost_bps),
+            "max_trade_risk_pct": min(settings.max_trade_risk_pct, 0.01),
+            "max_portfolio_open_risk_pct": settings.max_portfolio_open_risk_pct,
+            "max_symbol_exposure_pct": settings.max_symbol_exposure_pct,
+            "max_sector_exposure_pct": settings.max_sector_exposure_pct,
+            "max_open_positions": settings.max_open_positions,
+            "intraday_entry_start_minutes": settings.intraday_entry_start_minutes,
+            "intraday_entry_cutoff_minutes": settings.intraday_entry_cutoff_minutes,
+            "intraday_flatten_minutes": settings.intraday_flatten_minutes,
+            "min_hold_minutes": min_hold_minutes or 0.0,
+            "exit_confirmation_spread_pct": exit_confirmation_spread_pct or 0.0,
+        }
+        result = simulate_portfolio(
+            bars_by_symbol, config,
+            sectors={symbol: sector_for_symbol(symbol, settings) for symbol in bars_by_symbol},
+            validation={"confidence": settings.validation_confidence},
+        )
+        candidate = strategy_config(settings)
+        candidate.update({
+            "signal_fast_bars": config["fast_bars"],
+            "signal_slow_bars": config["slow_bars"],
+            "signal_min_spread_pct": config["min_spread_pct"],
+            "signal_min_buy_rsi": config["min_buy_rsi"],
+        })
+        identity = validation_config_key(candidate)
+        significance = result.get("significance", {})
+        validated = validation_verdict(significance, settings.validation_min_trades)
+        result["validation"] = {
+            "config_hash": identity["key"],
+            "config": identity["config"],
+            "validated": validated,
+            "minimum_trades": settings.validation_min_trades,
+            "required_by_execution": settings.require_validated_strategy,
+            "note": (
+                "Validated means the bootstrap interval for the mean net trade return "
+                "is entirely above zero and the sample meets the minimum trade count. "
+                "It is not a guarantee of future returns."
+            ),
+        }
+        if persist:
+            save_strategy_validation(
+                identity["key"], candidate.get("strategy", "unknown"), identity["config"],
+                int(significance.get("n") or 0), significance.get("mean"),
+                significance.get("ci_low"), significance.get("ci_high"), validated,
+                {
+                    "metrics": result.get("metrics"),
+                    "significance": significance,
+                    "period": result.get("period"),
+                    "exit_reasons": result.get("exit_reasons"),
+                    "benchmark": result.get("benchmark"),
+                    "config": config,
+                },
+            )
+        result["persisted"] = bool(persist)
+        return result
+    except HTTPException:
+        raise
+    except Exception as exc:
+        raise HTTPException(
+            status_code=503, detail=f"Portfolio research unavailable: {exc}") from exc
 
 
 @app.get("/account/reconciliation")

@@ -165,6 +165,30 @@ class PlaceEntryGuardTests(unittest.TestCase):
 
         self.assertIn("session loss limit", captured.output[0])
 
+    def test_low_bar_coverage_blocks_the_entry(self):
+        with patch("app.services.execution.minutes_since_open", return_value=100.0), \
+                patch("app.services.execution.symbol_session_bar_count", return_value=10), \
+                self.assertLogs("execution", level="WARNING") as captured:
+            self.run_entry(min_entry_bar_coverage_pct=80.0)
+
+        self.assertIn("expected session bars", captured.output[0])
+
+    def test_unvalidated_configuration_blocks_when_required(self):
+        with patch("app.services.execution.latest_strategy_validation", return_value=None), \
+                self.assertLogs("execution", level="WARNING") as captured:
+            self.run_entry(require_validated_strategy=True)
+
+        self.assertIn("no validated out-of-sample record", captured.output[0])
+
+    def test_validated_configuration_allows_the_entry(self):
+        with patch("app.services.execution.latest_strategy_validation",
+                   return_value={"validated": True}), \
+                patch("app.services.execution.entry_count_since", return_value=0), \
+                self.assertLogs("execution", level="WARNING") as captured:
+            self.run_entry(require_validated_strategy=True)
+
+        self.assertNotIn("no validated out-of-sample record", "".join(captured.output))
+
     def test_pool_loss_inside_the_limit_does_not_block(self):
         exit_at = datetime.now(NY).replace(hour=10, minute=0, second=0, microsecond=0)
         trades = [{"pool": "intraday", "gross_realized_pnl": -100.0,

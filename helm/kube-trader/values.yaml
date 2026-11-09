@@ -58,6 +58,16 @@ config:
   alpacaActivityLookbackDays: "30"
   maxSignalAgeSeconds: "180"
   executionLatencyWarnSeconds: "30"
+  riskViewTtlSeconds: "5"
+  executionMaxWorkers: "4"
+  entryOrderType: market
+  entryLimitOffsetBps: "10"
+  limitOrderTimeoutSeconds: "15"
+  minEntryBarCoveragePct: "0"
+  requireValidatedStrategy: "false"
+  validationMinTrades: "30"
+  validationConfidence: "0.95"
+  portfolioBacktestMaxSymbols: "40"
 persistence:
   enabled: true
   size: 2Gi

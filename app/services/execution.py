@@ -2,8 +2,10 @@ import hashlib
 import json
 import logging
 import math
+import threading
 import time
 import uuid
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timedelta, timezone
 from zoneinfo import ZoneInfo
 
@@ -11,7 +13,8 @@ import httpx
 from alpaca.common.exceptions import APIError
 from alpaca.trading.client import TradingClient
 from alpaca.trading.enums import OrderClass, OrderSide, OrderType, QueryOrderStatus, TimeInForce
-from alpaca.trading.requests import (GetOrderByIdRequest, GetOrdersRequest, MarketOrderRequest, StopLossRequest,
+from alpaca.trading.requests import (GetOrderByIdRequest, GetOrdersRequest, LimitOrderRequest,
+                                     MarketOrderRequest, StopLossRequest,
                                      GetPortfolioHistoryRequest, StopOrderRequest,
                                      TakeProfitRequest)
 
@@ -19,12 +22,13 @@ from app.alpaca_reporting import (fetch_account_activities, serialize_account,
                                  serialize_order, serialize_position)
 from app.database import (bot_origin_symbols, broker_activity_sync_status,
                           entry_count_since, fill_order_ids_missing_type,
-                          get_risk_state, init_db,
+                          get_risk_state, init_db, latest_strategy_validation,
                           managed_fills, managed_order_id, managed_order_stop_loss_pct,
                           managed_order_roots, managed_orders, managed_pool_assignments,
                           managed_symbols, orders_missing_fill_data, reserve_order,
                           save_account_snapshot, save_broker_order_type,
-                          save_broker_activities, save_risk_state, sync_managed_orders,
+                          save_broker_activities, save_risk_state,
+                          symbol_session_bar_count, sync_managed_orders,
                           update_broker_activity_sync, update_latest_account_orders,
                           update_order)
 from app.settings import get_settings, strategy_config
@@ -33,12 +37,16 @@ from app.trade_accounting import (build_realized_trade_report, reconcile_open_qu
                                  minutes_to_close, pool_session_realized,
                                  symbol_entry_block)
 from app.universe import sector_for_symbol
+from app.validation import validation_config_key
 
 logging.basicConfig(level=logging.INFO)
 log = logging.getLogger("execution")
 settings = get_settings()
 NY = ZoneInfo("America/New_York")
 POOL_WEIGHTS = {"intraday": 0.20, "swing": 0.30, "core": 0.50}
+RISK_VIEW_LOCK = threading.Lock()
+RISK_VIEW = {"value": None, "captured_at": 0.0}
+ENTRY_LOCK = threading.Lock()
 ACCOUNT_ACTIVITY_TYPES = ("FILL", "TRANS", "MISC", "FEE")
 
 
@@ -632,43 +640,171 @@ def reconcile(client_api: TradingClient):
             open_orders)
 
 
+def invalidate_risk_view():
+    with RISK_VIEW_LOCK:
+        RISK_VIEW["value"] = None
+        RISK_VIEW["captured_at"] = 0.0
+
+
+def cached_risk_view(client_api: TradingClient, max_age_seconds: float | None = None):
+    """Reconcile at most once per TTL so queued signals do not each pay for a snapshot."""
+    ttl = settings.risk_view_ttl_seconds if max_age_seconds is None else max_age_seconds
+    with RISK_VIEW_LOCK:
+        value = RISK_VIEW["value"]
+        if value is not None and time.monotonic() - RISK_VIEW["captured_at"] <= ttl:
+            return value
+        value = reconcile(client_api)
+        RISK_VIEW["value"] = value
+        RISK_VIEW["captured_at"] = time.monotonic()
+        return value
+
+
+def build_entry_request(symbol: str, qty: int, price: float, stop_price: float,
+                        take_profit_price: float | None, client_order_id: str,
+                        pool: str, force_market: bool = False):
+    """Build the entry order and report whether it is a marketable limit."""
+    if pool == "intraday":
+        if settings.entry_order_type == "marketable_limit" and not force_market:
+            limit_price = max(
+                round(price * (1 + settings.entry_limit_offset_bps / 10_000.0), 2), 0.01)
+            # A distinct client id keeps a cancelled limit order from overwriting the
+            # ledger row that is ultimately mapped to the market fallback.
+            return LimitOrderRequest(
+                symbol=symbol, qty=qty, side=OrderSide.BUY, type=OrderType.LIMIT,
+                limit_price=limit_price, time_in_force=TimeInForce.DAY,
+                order_class=OrderClass.BRACKET,
+                stop_loss=StopLossRequest(stop_price=stop_price),
+                take_profit=TakeProfitRequest(limit_price=take_profit_price),
+                client_order_id=(client_order_id + "-l")[:48],
+            ), True
+        return MarketOrderRequest(
+            symbol=symbol, qty=qty, side=OrderSide.BUY, type=OrderType.MARKET,
+            time_in_force=TimeInForce.DAY, order_class=OrderClass.BRACKET,
+            stop_loss=StopLossRequest(stop_price=stop_price),
+            take_profit=TakeProfitRequest(limit_price=take_profit_price),
+            client_order_id=client_order_id,
+        ), False
+    # Multi-day positions use a GTC protective stop without an arbitrary take-profit.
+    return MarketOrderRequest(
+        symbol=symbol, qty=qty, side=OrderSide.BUY, type=OrderType.MARKET,
+        time_in_force=TimeInForce.GTC, order_class=OrderClass.OTO,
+        stop_loss=StopLossRequest(stop_price=stop_price),
+        client_order_id=client_order_id,
+    ), False
+
+
+def order_status(order) -> str:
+    return str(getattr(getattr(order, "status", ""), "value",
+                       getattr(order, "status", ""))).lower()
+
+
+def await_fill_or_fallback(client_api: TradingClient, order, symbol: str, qty: int,
+                           stop_price: float, take_profit_price: float | None,
+                           pool: str, client_order_id: str):
+    """Give a marketable limit a short window, then take liquidity for the remainder."""
+    deadline = time.monotonic() + max(settings.limit_order_timeout_seconds, 0.0)
+    while time.monotonic() < deadline:
+        try:
+            current = client_api.get_order_by_id(order.id)
+        except Exception:
+            current = order
+        status = order_status(current)
+        if status in {"filled", "canceled", "expired", "rejected", "stopped"}:
+            return current
+        if float(getattr(current, "filled_qty", None) or 0.0) > 0:
+            # A partial fill keeps the remaining DAY order working under the broker.
+            return current
+        time.sleep(0.5)
+    try:
+        client_api.cancel_order_by_id(order.id)
+    except APIError:
+        log.exception("Unable to cancel unfilled limit order %s for %s", order.id, symbol)
+    try:
+        current = client_api.get_order_by_id(order.id)
+    except Exception:
+        current = order
+    if order_status(current) not in {"canceled", "expired", "rejected"}:
+        log.warning(
+            "Limit order %s for %s is still live after the fallback timeout; leaving it "
+            "instead of submitting a second entry", order.id, symbol)
+        return current
+    remaining = qty - float(getattr(current, "filled_qty", None) or 0.0)
+    if remaining < 1:
+        return current
+    fallback, _ = build_entry_request(
+        symbol, int(remaining), 0.0, stop_price, take_profit_price,
+        (client_order_id + "-f")[:48], pool, force_market=True)
+    log.warning("Limit entry for %s did not fill; submitting a market order for %s shares",
+                symbol, int(remaining))
+    return client_api.submit_order(fallback)
+
+
 def place_entry(client_api: TradingClient, event: dict, signal_id: str,
-                account, positions, risk: dict):
+                account, positions, risk: dict) -> bool:
+    """Return True only when a new order was submitted for this signal."""
     if event.get("action") != "buy" or risk["halted"]:
-        return
+        return False
     symbol = event["symbol"]
     clock = client_api.get_clock()
     if not clock.is_open:
-        log.info("Ignoring %s entry because the US market is closed", symbol)
-        return
+        log.info("Ignoring %s entry because the NYSE market is closed", symbol)
+        return False
     if any(position.symbol == symbol for position in positions):
         log.info("Ignoring entry for already-held symbol %s", symbol)
-        return
+        return False
     pool = event.get("pool", "intraday")
     if pool not in POOL_WEIGHTS:
         log.error("Unknown allocation pool %s; rejecting signal", pool)
-        return
+        return False
     session_now = datetime.now(NY)
+    if settings.require_validated_strategy:
+        config_key = validation_config_key(strategy_config(settings))["key"]
+        try:
+            record = latest_strategy_validation(config_key)
+        except Exception:
+            log.exception("Unable to read strategy validation for %s", config_key)
+            record = None
+        if not (record and record.get("validated")):
+            log.warning(
+                "Ignoring entry for %s: strategy configuration %s has no validated "
+                "out-of-sample record", symbol, config_key)
+            return False
     if pool == "intraday" and settings.intraday_entry_start_minutes > 0:
         elapsed = minutes_since_open(session_now)
         if elapsed is not None and elapsed < settings.intraday_entry_start_minutes:
             log.info("Ignoring intraday entry for %s: %.0f minutes since the open",
                      symbol, elapsed)
-            return
+            return False
+    if pool == "intraday" and settings.min_entry_bar_coverage_pct > 0:
+        elapsed = minutes_since_open(session_now)
+        if elapsed is not None and elapsed >= 5:
+            expected = min(int(elapsed), 390)
+            try:
+                observed = symbol_session_bar_count(symbol)
+                coverage = 100.0 * observed / expected if expected else 0.0
+            except Exception:
+                log.exception("Unable to read session bar coverage for %s", symbol)
+                coverage = 0.0
+            if coverage < settings.min_entry_bar_coverage_pct:
+                log.warning(
+                    "Ignoring intraday entry for %s: %.1f%% of expected session bars "
+                    "observed, below %.1f%%", symbol, coverage,
+                    settings.min_entry_bar_coverage_pct)
+                return False
     if pool == "intraday" and settings.intraday_entry_cutoff_minutes > 0:
         remaining = minutes_to_close(clock)
         if remaining is not None and remaining <= settings.intraday_entry_cutoff_minutes:
             log.info("Ignoring intraday entry for %s: %.0f minutes to close", symbol, remaining)
-            return
+            return False
     if settings.max_entries_per_5min > 0:
         recent_entries = entry_count_since(300)
         if recent_entries >= settings.max_entries_per_5min:
             log.info("Ignoring entry for %s: %s entries already opened in the last 5 minutes",
                      symbol, recent_entries)
-            return
+            return False
     if len(positions) >= settings.max_open_positions:
         log.info("Ignoring entry for %s because MAX_OPEN_POSITIONS is reached", symbol)
-        return
+        return False
     open_orders = client_api.get_orders(GetOrdersRequest(
         status=QueryOrderStatus.OPEN, limit=500, nested=True,
     ))
@@ -677,7 +813,7 @@ def place_entry(client_api: TradingClient, event: dict, signal_id: str,
                            getattr(item, "side", ""))).lower() == OrderSide.BUY.value
            for order in open_orders for item in order_tree(order)):
         log.info("Ignoring entry for %s because an open buy order already exists", symbol)
-        return
+        return False
     needs_trade_history = (
         settings.symbol_loss_cooldown_seconds > 0
         or settings.symbol_daily_loss_limit > 0
@@ -692,7 +828,7 @@ def place_entry(client_api: TradingClient, event: dict, signal_id: str,
             settings.symbol_loss_cooldown_seconds, settings.symbol_daily_loss_limit, NY)
         if block:
             log.info("Ignoring entry: %s", block)
-            return
+            return False
     if pool == "intraday" and settings.intraday_daily_loss_limit_pct > 0 and risk.get("equity"):
         pool_loss = pool_session_realized(
             session_trades, pool, session_now.date(), NY)
@@ -701,10 +837,10 @@ def place_entry(client_api: TradingClient, event: dict, signal_id: str,
             log.warning(
                 "Ignoring entry for %s: intraday pool realized %.2f today, beyond the "
                 "%.2f session loss limit", symbol, pool_loss, -pool_limit)
-            return
+            return False
     price = float(event["price"])
     if price <= 0:
-        return
+        return False
     equity = risk["equity"]
     allocation = risk["reconciliation"]["allocations"][pool]
     sector = sector_for_symbol(symbol, settings)
@@ -727,7 +863,7 @@ def place_entry(client_api: TradingClient, event: dict, signal_id: str,
     )
     if qty < 1:
         log.info("Risk/allocation limits leave no whole shares for %s", symbol)
-        return
+        return False
 
     client_order_id = "kt-" + hashlib.sha256(f"{symbol}:{pool}:{signal_id}".encode()).hexdigest()[:28]
     signal_timestamp = datetime.fromisoformat(event["ts"].replace("Z", "+00:00"))
@@ -790,25 +926,15 @@ def place_entry(client_api: TradingClient, event: dict, signal_id: str,
                 datetime.now(timezone.utc).isoformat(), event.get("ts"), signal_id,
                 client_order_id, symbol, pool,
             )
-        return
+        return False
     try:
-        if pool == "intraday":
-            request = MarketOrderRequest(
-                symbol=symbol, qty=qty, side=OrderSide.BUY, type=OrderType.MARKET,
-                time_in_force=TimeInForce.DAY, order_class=OrderClass.BRACKET,
-                stop_loss=StopLossRequest(stop_price=stop_price),
-                take_profit=TakeProfitRequest(limit_price=take_profit_price),
-                client_order_id=client_order_id,
-            )
-        else:
-            # Multi-day positions use a GTC protective stop without an arbitrary take-profit.
-            request = MarketOrderRequest(
-                symbol=symbol, qty=qty, side=OrderSide.BUY, type=OrderType.MARKET,
-                time_in_force=TimeInForce.GTC, order_class=OrderClass.OTO,
-                stop_loss=StopLossRequest(stop_price=stop_price),
-                client_order_id=client_order_id,
-            )
+        request, is_limit = build_entry_request(
+            symbol, qty, price, stop_price, take_profit_price, client_order_id, pool)
         order = client_api.submit_order(request)
+        if is_limit:
+            order = await_fill_or_fallback(
+                client_api, order, symbol, qty, stop_price, take_profit_price,
+                pool, client_order_id)
     except Exception:
         update_order(client_order_id, None, "submission_unknown")
         log.exception(
@@ -817,7 +943,7 @@ def place_entry(client_api: TradingClient, event: dict, signal_id: str,
             datetime.now(timezone.utc).isoformat(), event.get("ts"), signal_id,
             client_order_id, symbol, pool, qty,
         )
-        return
+        return False
     status = str(getattr(order.status, "value", order.status)).lower()
     broker_order_id = str(order.id)
     update_order(
@@ -840,9 +966,11 @@ def place_entry(client_api: TradingClient, event: dict, signal_id: str,
         datetime.now(timezone.utc).isoformat(), event.get("ts"), signal_id,
         client_order_id, broker_order_id, mode, pool, symbol, qty, stop_price, status,
     )
+    return True
 
 
-def handle_signal(client_api: TradingClient, event: dict, signal_id: str, risk: dict) -> bool:
+def handle_signal(client_api: TradingClient, event: dict, signal_id: str,
+                  risk: dict | None = None) -> bool:
     if not settings.execution_enabled:
         log.info("Execution disabled; signal observed: %s %s", event.get("symbol"), event.get("action"))
         return True
@@ -859,7 +987,7 @@ def handle_signal(client_api: TradingClient, event: dict, signal_id: str, risk: 
     if age < -30 or age > settings.max_signal_age_seconds:
         log.warning("Ignoring stale/future signal for %s (age %.1fs)", event.get("symbol"), age)
         return True
-    account, positions, risk, _ = reconcile(client_api)
+    account, positions, risk, _ = cached_risk_view(client_api)
     if action == "sell":
         assigned_pool = managed_pool_assignments().get(event["symbol"])
         event_pool = event.get("pool", "intraday")
@@ -874,13 +1002,82 @@ def handle_signal(client_api: TradingClient, event: dict, signal_id: str, risk: 
         if event["symbol"] in managed_symbols() and any(
             position.symbol == event["symbol"] for position in positions
         ):
-            return close_managed_position(
+            closed = close_managed_position(
                 client_api, event["symbol"], event_pool, positions, signal_id, event,
                 cancel_protective_stop=settings.stop_management_enabled,
             )
+            if closed:
+                invalidate_risk_view()
+            return closed
         return True
-    place_entry(client_api, event, signal_id, account, positions, risk)
+    with ENTRY_LOCK:
+        placed = place_entry(client_api, event, signal_id, account, positions, risk)
+    if placed:
+        invalidate_risk_view()
     return True
+
+
+def dedupe_signals(messages) -> tuple[list[tuple[str, dict]], list[str]]:
+    """Keep the newest event per symbol and report the message ids to acknowledge."""
+    parsed = []
+    dropped = []
+    for message_id, fields in messages:
+        try:
+            parsed.append((message_id, json.loads(fields["data"])))
+        except Exception:
+            log.exception("Dropping unreadable signal %s", message_id)
+            dropped.append(message_id)
+    newest: dict[str, tuple[tuple[str, str], str, dict]] = {}
+    for message_id, event in parsed:
+        symbol = str(event.get("symbol") or "")
+        stamp = (str(event.get("ts") or ""), message_id)
+        current = newest.get(symbol)
+        if current is None:
+            newest[symbol] = (stamp, message_id, event)
+            continue
+        if stamp > current[0]:
+            dropped.append(current[1])
+            newest[symbol] = (stamp, message_id, event)
+        else:
+            dropped.append(message_id)
+    kept = [(message_id, event) for _, message_id, event in newest.values()]
+    # Sell first so a freed position or pool budget can fund later buys.
+    kept.sort(key=lambda item: (0 if item[1].get("action") == "sell" else 1,
+                                str(item[1].get("ts") or ""), item[0]))
+    return kept, dropped
+
+
+def _handle_and_ack(client_api: TradingClient, redis_client, message_id: str, event: dict):
+    try:
+        started = time.monotonic()
+        handled = handle_signal(client_api, event, message_id)
+        elapsed = time.monotonic() - started
+        if elapsed > settings.execution_latency_warn_seconds:
+            log.warning("Signal %s took %.1fs to handle; queued signals are delayed",
+                        message_id, elapsed)
+        if handled:
+            redis_client.xack(SIGNAL_STREAM, "execution-workers", message_id)
+    except Exception:
+        log.exception("Unable to process execution signal %s", message_id)
+
+
+def process_batch(client_api: TradingClient, redis_client, messages) -> None:
+    """Deduplicate a batch, then place orders concurrently behind the shared risk view."""
+    kept, dropped = dedupe_signals(messages)
+    for message_id in dropped:
+        redis_client.xack(SIGNAL_STREAM, "execution-workers", message_id)
+    if not kept:
+        return
+    workers = min(max(1, settings.execution_max_workers), len(kept))
+    if workers == 1:
+        for message_id, event in kept:
+            _handle_and_ack(client_api, redis_client, message_id, event)
+        return
+    with ThreadPoolExecutor(max_workers=workers) as pool:
+        futures = [pool.submit(_handle_and_ack, client_api, redis_client, message_id, event)
+                   for message_id, event in kept]
+        for future in futures:
+            future.result()
 
 
 def main():
@@ -899,17 +1096,17 @@ def main():
     consumer = f"execution-{uuid.uuid4()}"
     last_reconcile = 0.0
     last_activity_sync = 0.0
-    risk = {"halted": False}
     while True:
         if time.monotonic() - last_reconcile >= settings.reconcile_interval_seconds:
             reconcile_started = time.monotonic()
             try:
-                _, positions, risk, open_orders = reconcile(client_api)
+                _, positions, risk, open_orders = cached_risk_view(
+                    client_api, max_age_seconds=0.0)
                 flatten_intraday_positions(client_api, positions)
                 refresh_tracked_order_statuses(client_api, open_orders)
             except Exception:
+                invalidate_risk_view()
                 log.exception("Broker reconciliation failed; no entries will be processed")
-                risk = {"halted": True, "equity": 0.0, "buying_power": 0.0}
             reconcile_seconds = time.monotonic() - reconcile_started
             if reconcile_seconds > settings.execution_latency_warn_seconds:
                 log.warning(
@@ -926,21 +1123,7 @@ def main():
         batches = read_group(redis_client, "execution-workers", consumer, SIGNAL_STREAM,
                              count=20, block=5000)
         for _, messages in batches:
-            for message_id, fields in messages:
-                try:
-                    signal_started = time.monotonic()
-                    handled = handle_signal(
-                        client_api, json.loads(fields["data"]), message_id, risk,
-                    )
-                    signal_seconds = time.monotonic() - signal_started
-                    if signal_seconds > settings.execution_latency_warn_seconds:
-                        log.warning(
-                            "Signal %s took %.1fs to handle; queued signals are delayed",
-                            message_id, signal_seconds)
-                    if handled:
-                        redis_client.xack(SIGNAL_STREAM, "execution-workers", message_id)
-                except Exception:
-                    log.exception("Unable to process execution signal %s", message_id)
+            process_batch(client_api, redis_client, messages)
 
 
 if __name__ == "__main__":

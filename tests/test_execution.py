@@ -572,6 +572,7 @@ class HandleSignalEntryGateTests(unittest.TestCase):
     def setUp(self):
         from datetime import datetime, timezone
 
+        execution.invalidate_risk_view()
         self.event = {
             "action": "buy",
             "symbol": "AAPL",

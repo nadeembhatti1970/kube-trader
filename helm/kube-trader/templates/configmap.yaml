@@ -31,6 +31,16 @@ data:
   ALPACA_ACTIVITY_LOOKBACK_DAYS: {{ .Values.config.alpacaActivityLookbackDays | quote }}
   MAX_SIGNAL_AGE_SECONDS: {{ .Values.config.maxSignalAgeSeconds | quote }}
   EXECUTION_LATENCY_WARN_SECONDS: {{ .Values.config.executionLatencyWarnSeconds | quote }}
+  RISK_VIEW_TTL_SECONDS: {{ .Values.config.riskViewTtlSeconds | quote }}
+  EXECUTION_MAX_WORKERS: {{ .Values.config.executionMaxWorkers | quote }}
+  ENTRY_ORDER_TYPE: {{ .Values.config.entryOrderType | quote }}
+  ENTRY_LIMIT_OFFSET_BPS: {{ .Values.config.entryLimitOffsetBps | quote }}
+  LIMIT_ORDER_TIMEOUT_SECONDS: {{ .Values.config.limitOrderTimeoutSeconds | quote }}
+  MIN_ENTRY_BAR_COVERAGE_PCT: {{ .Values.config.minEntryBarCoveragePct | quote }}
+  REQUIRE_VALIDATED_STRATEGY: {{ .Values.config.requireValidatedStrategy | quote }}
+  VALIDATION_MIN_TRADES: {{ .Values.config.validationMinTrades | quote }}
+  VALIDATION_CONFIDENCE: {{ .Values.config.validationConfidence | quote }}
+  PORTFOLIO_BACKTEST_MAX_SYMBOLS: {{ .Values.config.portfolioBacktestMaxSymbols | quote }}
   DATABASE_PATH: /data/market.db
   ETF_HOLDINGS_SYMBOL: {{ .Values.config.etfHoldingsSymbol | quote }}
   ETF_HOLDINGS_URL: {{ .Values.config.etfHoldingsUrl | quote }}

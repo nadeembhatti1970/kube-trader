@@ -62,6 +62,16 @@ class Settings(BaseSettings):
     reconcile_interval_seconds: int = 30
     max_signal_age_seconds: int = 180
     execution_latency_warn_seconds: int = 30
+    risk_view_ttl_seconds: float = 5.0
+    execution_max_workers: int = 4
+    entry_order_type: str = "market"
+    entry_limit_offset_bps: float = 10.0
+    limit_order_timeout_seconds: float = 15.0
+    min_entry_bar_coverage_pct: float = 0.0
+    require_validated_strategy: bool = False
+    validation_min_trades: int = 30
+    validation_confidence: float = 0.95
+    portfolio_backtest_max_symbols: int = 40
     alert_webhook_url: str = ""
     log_level: str = "INFO"
     model_config = SettingsConfigDict(env_file=".env", extra="ignore")
@@ -103,11 +113,15 @@ def strategy_config(settings: Settings | None = None, event: dict | None = None)
         "intraday_entry_cutoff_minutes": current.intraday_entry_cutoff_minutes,
         "intraday_entry_start_minutes": current.intraday_entry_start_minutes,
         "intraday_daily_loss_limit_pct": current.intraday_daily_loss_limit_pct,
+        "entry_order_type": current.entry_order_type,
+        "entry_limit_offset_bps": current.entry_limit_offset_bps,
         "risk_controls": {
             "configured_max_trade_risk_pct": current.max_trade_risk_pct,
             "effective_max_trade_risk_pct": min(current.max_trade_risk_pct, 0.01),
             "max_portfolio_open_risk_pct": current.max_portfolio_open_risk_pct,
             "max_entries_per_5min": current.max_entries_per_5min,
+            "min_entry_bar_coverage_pct": current.min_entry_bar_coverage_pct,
+            "require_validated_strategy": current.require_validated_strategy,
             "daily_drawdown_limit_pct": current.daily_drawdown_limit_pct,
             "symbol_loss_cooldown_seconds": current.symbol_loss_cooldown_seconds,
             "symbol_daily_loss_limit": current.symbol_daily_loss_limit,

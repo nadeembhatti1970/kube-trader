@@ -36,6 +36,14 @@ def init_db():
             );
             ALTER TABLE backtest_metrics ADD COLUMN IF NOT EXISTS model_config JSONB
               NOT NULL DEFAULT '{}';
+            CREATE TABLE IF NOT EXISTS strategy_validation (
+              config_hash TEXT PRIMARY KEY, strategy TEXT NOT NULL,
+              config JSONB NOT NULL, evaluated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+              out_of_sample_trades INTEGER NOT NULL,
+              mean_net_return_pct DOUBLE PRECISION,
+              ci_low DOUBLE PRECISION, ci_high DOUBLE PRECISION,
+              validated BOOLEAN NOT NULL, report JSONB NOT NULL
+            );
             CREATE TABLE IF NOT EXISTS position_assignments (
               symbol TEXT PRIMARY KEY, pool TEXT NOT NULL, note TEXT,
               assigned_at TIMESTAMPTZ NOT NULL DEFAULT now()
@@ -154,6 +162,18 @@ def recent_bars(symbol: str, limit: int) -> list[dict]:
             (symbol, limit),
         ).fetchall()
     return list(reversed(rows))
+
+
+def symbol_session_bar_count(symbol: str) -> int:
+    """Regular-session minute bars recorded for a symbol in the current session."""
+    with connect() as db:
+        row = db.execute("""
+          SELECT count(*) AS bars FROM bars
+          WHERE symbol=%s
+            AND (ts AT TIME ZONE 'America/New_York')::date
+                = (now() AT TIME ZONE 'America/New_York')::date
+        """, (symbol.upper(),)).fetchone()
+    return int(row["bars"]) if row else 0
 
 
 def minute_bar_coverage(days: int = 7, expected_bars: int = 390,
@@ -776,6 +796,34 @@ def managed_order_stop_loss_pct(symbol: str, pool: str):
 def latest_backtest(symbol: str):
     with connect() as db:
         return db.execute("SELECT * FROM backtest_metrics WHERE symbol=%s", (symbol,)).fetchone()
+
+
+def save_strategy_validation(config_hash: str, strategy: str, config: dict,
+                             out_of_sample_trades: int,
+                             mean_net_return_pct: float | None,
+                             ci_low: float | None, ci_high: float | None,
+                             validated: bool, report: dict):
+    with connect() as db:
+        db.execute("""
+          INSERT INTO strategy_validation(
+            config_hash, strategy, config, out_of_sample_trades, mean_net_return_pct,
+            ci_low, ci_high, validated, report
+          ) VALUES (%s, %s, %s::jsonb, %s, %s, %s, %s, %s, %s::jsonb)
+          ON CONFLICT(config_hash) DO UPDATE SET
+            strategy=excluded.strategy, config=excluded.config, evaluated_at=now(),
+            out_of_sample_trades=excluded.out_of_sample_trades,
+            mean_net_return_pct=excluded.mean_net_return_pct,
+            ci_low=excluded.ci_low, ci_high=excluded.ci_high,
+            validated=excluded.validated, report=excluded.report
+        """, (config_hash, strategy, json.dumps(config), out_of_sample_trades,
+              mean_net_return_pct, ci_low, ci_high, validated, json.dumps(report)))
+
+
+def latest_strategy_validation(config_hash: str):
+    with connect() as db:
+        return db.execute("""
+          SELECT * FROM strategy_validation WHERE config_hash=%s
+        """, (config_hash,)).fetchone()
 
 
 def latest_account_snapshot():

@@ -3,7 +3,7 @@
 ## Metadata
 
 - **Name:** `kube-trader-pipeline`
-- **Version:** 2.1.0
+- **Version:** 2.2.0
 - **Target:** Docker Compose or Kubernetes/Helm deployment
 - **Purpose:** Describe how the implemented data, signal, backtest, paper/live execution, allocation, reconciliation, and circuit-breaker workers operate.
 
@@ -39,6 +39,14 @@ Alpaca's `StockDataStream` supplies minute bars. The configured feed defaults to
 | `INTRADAY_ENTRY_START_MINUTES` | `5` | Minutes after the open before intraday entries are allowed |
 | `INTRADAY_DAILY_LOSS_LIMIT_PCT` | `0.005` | Session realized-loss halt for new intraday entries |
 | `EXECUTION_LATENCY_WARN_SECONDS` | `30` | Signal-to-fill and reconciliation delay that triggers a warning log |
+| `RISK_VIEW_TTL_SECONDS` | `5` | Reuse one reconciliation across queued signals for this long |
+| `EXECUTION_MAX_WORKERS` | `4` | Concurrent signal handlers per Redis batch |
+| `ENTRY_ORDER_TYPE` | `market` | `market` or the opt-in `marketable_limit` entry |
+| `ENTRY_LIMIT_OFFSET_BPS` / `LIMIT_ORDER_TIMEOUT_SECONDS` | `10` / `15` | Limit offset and fallback window for marketable-limit entries |
+| `MIN_ENTRY_BAR_COVERAGE_PCT` | `0` | Block intraday entries below this share of expected session bars; `0` disables |
+| `REQUIRE_VALIDATED_STRATEGY` | `false` | Block entries unless the current configuration has a validated record |
+| `VALIDATION_MIN_TRADES` / `VALIDATION_CONFIDENCE` | `30` / `0.95` | Minimum sample and bootstrap confidence for a validation verdict |
+| `PORTFOLIO_BACKTEST_MAX_SYMBOLS` | `40` | Symbol cap for `/research/portfolio` |
 | `STOP_LOSS_PCT` / `TAKE_PROFIT_PCT` | `0.02` / `0.04` | Default bracket distances |
 | `DAILY_DRAWDOWN_LIMIT_PCT` | `0.03` | Session loss threshold for new-entry halt |
 | `INTRADAY_ALLOCATION_PCT` | `0.20` | Intraday virtual pool target |
@@ -98,12 +106,23 @@ The daily baseline uses Alpaca's same-day 1-minute portfolio history during mark
 
 The breaker does not terminate a pod, cancel bracket exits, or liquidate positions. If the webhook is absent or delivery fails, the critical log remains the only alert channel.
 
+## Signal throughput and order execution
+
+The execution worker keeps one broker reconciliation for `RISK_VIEW_TTL_SECONDS` rather than reconciling for every queued signal. Within a Redis batch it keeps only the newest event per symbol, acknowledges and discards older duplicates, sorts sells before buys, and runs up to `EXECUTION_MAX_WORKERS` handlers concurrently. Entry placement is serialized behind a lock so the burst cap (`MAX_ENTRIES_PER_5MIN`) and the summed open-stop-risk cap remain exact; exits are not serialized. A handler that raises does not acknowledge its message, so it is retried. Any reconciliation or signal slower than `EXECUTION_LATENCY_WARN_SECONDS` is logged.
+
+Entries are market orders by default. `ENTRY_ORDER_TYPE=marketable_limit` sends a limit `ENTRY_LIMIT_OFFSET_BPS` through the reference price and waits `LIMIT_ORDER_TIMEOUT_SECONDS`; an unfilled order is cancelled and the unfilled quantity is sent as a market order. A partially filled order, or one whose cancellation cannot be confirmed, is left working instead of being replaced, so a position cannot be doubled. `MIN_ENTRY_BAR_COVERAGE_PCT` compares the symbol's stored session bars with the elapsed session and fails closed when the feed is thin.
+
+## Strategy validation
+
+`/research/portfolio` simulates the whole selected watchlist together under the live pool, concentration, cash, risk, timing, and cost constraints. It reports portfolio equity, drawdown, Sharpe, exposure, turnover, cost drag, exit reasons, an equal-weight buy-and-hold benchmark, and a moving-block bootstrap interval plus minimum detectable edge for the mean net trade return. Candidate parameters can be supplied as query overrides without changing runtime settings. `persist=true` writes the verdict to `strategy_validation`, keyed by a hash of the strategy parameters. A configuration counts as validated only when the interval lies entirely above zero and the sample meets `VALIDATION_MIN_TRADES`. With `REQUIRE_VALIDATED_STRATEGY=true`, new entries are blocked unless that record exists, which prevents risk from growing on an untested configuration. Validation is still evidence, not a guarantee.
+
 ## Operational endpoints and deployment
 
 - `GET /healthz`: API process liveness.
 - `GET /readyz`: PostgreSQL connectivity.
 - `GET /backtests/{symbol}`: latest rolling metrics.
-- `GET /trades`: realized P&L with gross/net fee completeness, fill source, and attribution source; absent fee or strategy metadata stays unknown. Also returns `summary_by_exit_reason`, a pro-rata `fee_estimate` with per-slice `estimated_net_realized_pnl` (labelled estimated, never replacing strict per-order fees), `execution_latency` percentiles, `bar_coverage`, and an ETF `benchmark` return over the closed-trade window.
+- `GET /trades`: realized P&L with gross/net fee completeness, fill source, and attribution source; absent fee or strategy metadata stays unknown.
+- `GET /research/portfolio`: portfolio-level walk-forward simulation over the watchlist with significance testing; `persist=true` records the validation verdict. Also returns `summary_by_exit_reason`, a pro-rata `fee_estimate` with per-slice `estimated_net_realized_pnl` (labelled estimated, never replacing strict per-order fees), `execution_latency` percentiles, `bar_coverage`, and an ETF `benchmark` return over the closed-trade window.
 - `GET /account/reconciliation`: latest account and allocation snapshot, including `ledger_discrepancies`, `open_risk`, `unmanaged_bot_origin_positions`, and `warnings`. JSON GET responses are named `<endpoint>_<UTC timestamp>.json` via `Content-Disposition` (`attachment` only with `?download=true`; otherwise `inline`).
 - `GET /risk`: current New York-date breaker state.
 
