@@ -3,7 +3,7 @@
 ## Metadata
 
 - **Name:** `kube-trader-pipeline`
-- **Version:** 2.2.0
+- **Version:** 2.3.0
 - **Target:** Docker Compose or Kubernetes/Helm deployment
 - **Purpose:** Describe how the implemented data, signal, backtest, paper/live execution, allocation, reconciliation, and circuit-breaker workers operate.
 
@@ -114,7 +114,7 @@ Entries are market orders by default. `ENTRY_ORDER_TYPE=marketable_limit` sends 
 
 ## Strategy validation
 
-`/research/portfolio` simulates the whole selected watchlist together under the live pool, concentration, cash, risk, timing, and cost constraints. It reports portfolio equity, drawdown, Sharpe, exposure, turnover, cost drag, exit reasons, an equal-weight buy-and-hold benchmark, and a moving-block bootstrap interval plus minimum detectable edge for the mean net trade return. Candidate parameters can be supplied as query overrides without changing runtime settings. `persist=true` writes the verdict to `strategy_validation`, keyed by a hash of the strategy parameters. A configuration counts as validated only when the interval lies entirely above zero and the sample meets `VALIDATION_MIN_TRADES`. With `REQUIRE_VALIDATED_STRATEGY=true`, new entries are blocked unless that record exists, which prevents risk from growing on an untested configuration. Validation is still evidence, not a guarantee.
+`/research/portfolio` simulates the whole selected watchlist together under the live pool, concentration, cash, risk, timing, and cost constraints. It reports portfolio equity, drawdown, Sharpe, exposure, turnover, cost drag, exit reasons, an equal-weight buy-and-hold benchmark, and a moving-block bootstrap interval plus minimum detectable edge for the mean net trade return. Candidate parameters can be supplied as query overrides without changing runtime settings: `fast_bars`, `slow_bars`, `min_spread_pct`, `min_buy_rsi`, `cost_bps`, `min_hold_minutes`, `exit_confirmation_spread_pct`, `exit_style` (`signal`, `protective_only`, `trailing`), `trailing_stop_pct`, and `resample_minutes`. The benchmark reports its return both outright and scaled to the strategy's average exposure. `persist=true` writes the verdict to `strategy_validation`, keyed by a hash of the strategy parameters including the exit and resampling choices. A configuration counts as validated only when the interval lies entirely above zero and the sample meets `VALIDATION_MIN_TRADES`. With `REQUIRE_VALIDATED_STRATEGY=true`, new entries are blocked unless that record exists, which prevents risk from growing on an untested configuration. Validation is still evidence, not a guarantee.
 
 ## Operational endpoints and deployment
 
@@ -122,7 +122,8 @@ Entries are market orders by default. `ENTRY_ORDER_TYPE=marketable_limit` sends 
 - `GET /readyz`: PostgreSQL connectivity.
 - `GET /backtests/{symbol}`: latest rolling metrics.
 - `GET /trades`: realized P&L with gross/net fee completeness, fill source, and attribution source; absent fee or strategy metadata stays unknown.
-- `GET /research/portfolio`: portfolio-level walk-forward simulation over the watchlist with significance testing; `persist=true` records the validation verdict. Also returns `summary_by_exit_reason`, a pro-rata `fee_estimate` with per-slice `estimated_net_realized_pnl` (labelled estimated, never replacing strict per-order fees), `execution_latency` percentiles, `bar_coverage`, and an ETF `benchmark` return over the closed-trade window.
+- `GET /research/portfolio`: portfolio-level walk-forward simulation over the watchlist with significance testing; `persist=true` records the validation verdict.
+- `python -m app.services.backfill --days 30`: seeds historical minute bars for research. It writes PostgreSQL only and never publishes to `market.bars`, so history cannot trigger signals or orders. Supports `--symbols` and `--feed sip|iex`, and is safe to rerun. Also returns `summary_by_exit_reason`, a pro-rata `fee_estimate` with per-slice `estimated_net_realized_pnl` (labelled estimated, never replacing strict per-order fees), `execution_latency` percentiles, `bar_coverage`, and an ETF `benchmark` return over the closed-trade window.
 - `GET /account/reconciliation`: latest account and allocation snapshot, including `ledger_discrepancies`, `open_risk`, `unmanaged_bot_origin_positions`, and `warnings`. JSON GET responses are named `<endpoint>_<UTC timestamp>.json` via `Content-Disposition` (`attachment` only with `?download=true`; otherwise `inline`).
 - `GET /risk`: current New York-date breaker state.
 

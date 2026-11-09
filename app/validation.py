@@ -17,13 +17,25 @@ VALIDATION_KEYS = (
     "intraday_entry_cutoff_minutes", "intraday_entry_start_minutes",
     "swing_atr_period", "swing_atr_multiple", "core_stop_loss_pct",
     "entry_order_type", "entry_limit_offset_bps",
+    "min_hold_minutes", "exit_confirmation_spread_pct", "exit_style",
+    "trailing_stop_pct", "resample_minutes",
 )
 Z_SCORES = {0.90: 1.645, 0.95: 1.960, 0.99: 2.576}
+# Live provenance records only execution settings, so simulator-only keys are
+# normalised here. Without this the live gate could never match a research verdict.
+SIMULATOR_DEFAULTS = {
+    "min_hold_minutes": 0.0,
+    "exit_confirmation_spread_pct": 0.0,
+    "exit_style": "signal",
+    "trailing_stop_pct": 0.0,
+    "resample_minutes": 1,
+}
 
 
 def validation_config_key(config: dict) -> dict:
     """Canonical key for the strategy parameters that define an edge."""
-    selected = {key: config.get(key) for key in VALIDATION_KEYS}
+    effective = {**SIMULATOR_DEFAULTS, **(config or {})}
+    selected = {key: effective.get(key) for key in VALIDATION_KEYS}
     digest = hashlib.sha256(
         json.dumps(selected, sort_keys=True, default=str).encode()
     ).hexdigest()

@@ -40,6 +40,12 @@ DEFAULT_CONFIG = {
     "intraday_flatten_minutes": 10,
     "min_hold_minutes": 0,
     "exit_confirmation_spread_pct": 0.0,
+    # signal: exit on the reverse crossover; protective_only: stop/target/flatten
+    # only; trailing: protective stop ratcheted behind the high.
+    "exit_style": "signal",
+    "trailing_stop_pct": 0.0,
+    # Aggregate minute bars into N-minute bars before evaluating signals.
+    "resample_minutes": 1,
 }
 
 
@@ -97,6 +103,30 @@ def _rolling(closes: list[float], period: int) -> list[float | None]:
         if index >= period - 1:
             values[index] = total / period
     return values
+
+
+def _resample(bars: list[dict], minutes: int) -> list[dict]:
+    """Aggregate normalized minute bars into fixed N-minute OHLC buckets."""
+    if minutes <= 1 or not bars:
+        return bars
+    buckets: dict[int, dict] = {}
+    for bar in bars:
+        bucket = int(bar["ts"].timestamp() // 60)
+        bucket -= bucket % minutes
+        item = buckets.get(bucket)
+        if item is None:
+            buckets[bucket] = {
+                "ts": datetime.fromtimestamp(bucket * 60, tz=timezone.utc),
+                "open": bar["open"],
+                "high": bar["high"],
+                "low": bar["low"],
+                "close": bar["close"],
+            }
+            continue
+        item["high"] = max(item["high"], bar["high"])
+        item["low"] = min(item["low"], bar["low"])
+        item["close"] = bar["close"]
+    return [buckets[key] for key in sorted(buckets)]
 
 
 def _prepare(bars: list[dict], config: dict) -> dict:
@@ -185,10 +215,19 @@ def simulate_portfolio(bars_by_symbol: dict[str, list[dict]], config: dict | Non
     pool_weight = float(effective["intraday_allocation_pct"])
     if pool != "intraday":
         raise ValueError("The portfolio simulator currently supports the intraday pool only")
+    exit_style = str(effective["exit_style"])
+    if exit_style not in {"signal", "protective_only", "trailing"}:
+        raise ValueError("exit_style must be signal, protective_only, or trailing")
+    if float(effective["trailing_stop_pct"]) < 0:
+        raise ValueError("trailing_stop_pct cannot be negative")
+    if exit_style == "trailing" and float(effective["trailing_stop_pct"]) <= 0:
+        raise ValueError("trailing exit_style requires trailing_stop_pct > 0")
+    if int(effective["resample_minutes"]) < 1:
+        raise ValueError("resample_minutes must be at least 1")
 
     frames = {}
     for symbol, bars in bars_by_symbol.items():
-        normalized = _normalize(bars)
+        normalized = _resample(_normalize(bars), int(effective["resample_minutes"]))
         if not normalized:
             continue
         frames[symbol.upper()] = _prepare(normalized, effective)
@@ -279,7 +318,7 @@ def simulate_portfolio(bars_by_symbol: dict[str, list[dict]], config: dict | Non
                 pending.pop(symbol, None)
                 continue
             if bar["open"] <= item["stop_price"]:
-                close(symbol, bar["open"], "stop", moment)
+                close(symbol, bar["open"], item["stop_reason"], moment)
                 pending.pop(symbol, None)
                 continue
             if bar["open"] >= item["target_price"]:
@@ -287,11 +326,22 @@ def simulate_portfolio(bars_by_symbol: dict[str, list[dict]], config: dict | Non
                 pending.pop(symbol, None)
                 continue
             if bar["low"] <= item["stop_price"]:
-                close(symbol, item["stop_price"], "stop", moment)
+                close(symbol, item["stop_price"], item["stop_reason"], moment)
                 pending.pop(symbol, None)
-            elif bar["high"] >= item["target_price"]:
+                continue
+            if bar["high"] >= item["target_price"]:
                 close(symbol, item["target_price"], "take_profit", moment)
                 pending.pop(symbol, None)
+                continue
+            trailing = float(effective["trailing_stop_pct"])
+            if trailing > 0:
+                # Ratchet from prior bars only, so this bar's high cannot set the
+                # stop that this same bar's low is tested against.
+                item["high_water"] = max(item["high_water"], bar["high"])
+                ratcheted = round(item["high_water"] * (1.0 - trailing), 2)
+                if ratcheted > item["stop_price"]:
+                    item["stop_price"] = ratcheted
+                    item["stop_reason"] = "trailing_stop"
 
         # Entries from the previous bar's signal.
         for symbol, frame, index in active:
@@ -350,6 +400,8 @@ def simulate_portfolio(bars_by_symbol: dict[str, list[dict]], config: dict | Non
                 "entry_price": price,
                 "stop_price": max(round(price * (1 - stop_pct), 2), 0.01),
                 "target_price": max(round(price * (1 + target_pct), 2), 0.01),
+                "stop_reason": "stop",
+                "high_water": price,
                 "entry_ts": moment,
                 "entry_index": index,
                 "sector": sectors.get(symbol, "unclassified"),
@@ -372,7 +424,8 @@ def simulate_portfolio(bars_by_symbol: dict[str, list[dict]], config: dict | Non
             elif not above and previous:
                 # Holding filters are applied when the pending sell is executed so
                 # the exit can retry on later bars instead of being lost.
-                pending[symbol] = "sell"
+                if exit_style == "signal":
+                    pending[symbol] = "sell"
 
         invested = position_value()
         equity_points.append((moment, cash + invested))
@@ -407,6 +460,11 @@ def simulate_portfolio(bars_by_symbol: dict[str, list[dict]], config: dict | Non
         bars = frame["bars"]
         if len(bars) >= 2 and bars[0]["close"] > 0:
             benchmark.append(bars[-1]["close"] / bars[0]["close"] - 1.0)
+    benchmark_return = (sum(benchmark) / len(benchmark) * 100 if benchmark else None)
+    average_exposure = metrics.get("average_exposure_pct")
+    benchmark_at_exposure = (
+        benchmark_return * average_exposure / 100.0
+        if benchmark_return is not None and average_exposure is not None else None)
     return {
         "status": "ok",
         "simulation": "portfolio-intraday-v1",
@@ -426,8 +484,18 @@ def simulate_portfolio(bars_by_symbol: dict[str, list[dict]], config: dict | Non
         "significance": significance,
         "benchmark": {
             "basis": "equal_weight_buy_and_hold",
-            "return_pct": (sum(benchmark) / len(benchmark) * 100 if benchmark else None),
-            "note": "Equal-weight first-to-last close of the simulated symbols; not SPY.",
+            "return_pct": benchmark_return,
+            "return_at_average_exposure_pct": benchmark_at_exposure,
+            "excess_return_at_exposure_pct": (
+                metrics["total_return_pct"] - benchmark_at_exposure
+                if metrics.get("total_return_pct") is not None
+                and benchmark_at_exposure is not None else None),
+            "note": (
+                "Equal-weight first-to-last close of the simulated symbols; not SPY. "
+                "The exposure-matched figure scales that return by the strategy's average "
+                "invested share, so a mostly-cash run is not credited with avoiding a "
+                "market decline."
+            ),
         },
         "trades": trades[-500:],
         "limitations": [

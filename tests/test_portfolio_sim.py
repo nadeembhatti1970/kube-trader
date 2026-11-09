@@ -107,6 +107,63 @@ class PortfolioSimulationTests(unittest.TestCase):
         self.assertEqual(result["trades"], [])
         self.assertIn("significance", result)
 
+    def test_protective_only_style_holds_through_a_reverse_crossover(self):
+        closes = ([100.0] * 30 + [100.0 + index for index in range(1, 11)]
+                  + [110.0] * 360)
+        config = {**BASE, "take_profit_pct": 0.50, "stop_loss_pct": 0.20,
+                  "intraday_flatten_minutes": 10}
+
+        with_signal = simulate_portfolio({"AAPL": bars_from(closes)}, config)
+        protective = simulate_portfolio(
+            {"AAPL": bars_from(closes)}, {**config, "exit_style": "protective_only"})
+
+        self.assertEqual(with_signal["trades"][0]["exit_reason"], "signal")
+        self.assertEqual(len(protective["trades"]), 1)
+        self.assertEqual(protective["trades"][0]["exit_reason"], "eod_flatten")
+
+    def test_trailing_style_ratchets_the_stop(self):
+        closes = [100.0] * 30 + [100.0 + index for index in range(1, 11)]
+        bars = bars_from(closes)
+        bars.append({"ts": bars[-1]["ts"] + timedelta(minutes=1), "open": 108.0,
+                     "high": 108.0, "low": 100.0, "close": 100.0})
+        result = simulate_portfolio(
+            {"AAPL": bars},
+            {**BASE, "exit_style": "trailing", "trailing_stop_pct": 0.02,
+             "take_profit_pct": 0.50, "stop_loss_pct": 0.20},
+        )
+
+        self.assertEqual(len(result["trades"]), 1)
+        trade = result["trades"][0]
+        self.assertEqual(trade["exit_reason"], "trailing_stop")
+        self.assertAlmostEqual(trade["exit_price"], round(110.0 * 1.001 * 0.98, 2), places=2)
+
+    def test_resampling_reduces_bars(self):
+        result = simulate_portfolio(
+            {"AAPL": bars_from(breakout_path())}, {**BASE, "resample_minutes": 5})
+        expected = -(-len(breakout_path()) // 5)
+        self.assertEqual(result["period"]["bars"], expected)
+
+    def test_invalid_exit_style_is_rejected(self):
+        with self.assertRaises(ValueError):
+            simulate_portfolio({"AAPL": bars_from(breakout_path())},
+                               {**BASE, "exit_style": "magic"})
+
+    def test_trailing_requires_a_trail_distance(self):
+        with self.assertRaises(ValueError):
+            simulate_portfolio({"AAPL": bars_from(breakout_path())},
+                               {**BASE, "exit_style": "trailing"})
+
+    def test_benchmark_reports_exposure_matched_return(self):
+        result = simulate_portfolio({"AAPL": bars_from(breakout_path())}, BASE)
+        benchmark = result["benchmark"]
+        exposure = result["metrics"]["average_exposure_pct"]
+        self.assertAlmostEqual(
+            benchmark["return_at_average_exposure_pct"],
+            benchmark["return_pct"] * exposure / 100.0,
+            places=9,
+        )
+        self.assertIsNotNone(benchmark["excess_return_at_exposure_pct"])
+
 
 class SignificanceTests(unittest.TestCase):
     def test_zero_mean_sample_has_a_ci_covering_zero(self):
@@ -159,6 +216,27 @@ class SignificanceTests(unittest.TestCase):
         changed = validation_config_key({**base, "signal_fast_bars": 8})
         self.assertEqual(first["key"], second["key"])
         self.assertNotEqual(first["key"], changed["key"])
+
+    def test_missing_simulator_keys_normalise_to_live_defaults(self):
+        base = {"strategy": "sma-crossover-confirmed-v1", "signal_fast_bars": 5,
+                "signal_slow_bars": 20}
+        explicit = {**base, "exit_style": "signal", "min_hold_minutes": 0.0,
+                    "exit_confirmation_spread_pct": 0.0, "trailing_stop_pct": 0.0,
+                    "resample_minutes": 1}
+        self.assertEqual(validation_config_key(base)["key"],
+                         validation_config_key(explicit)["key"])
+
+    def test_exit_variants_get_distinct_validation_keys(self):
+        base = {"strategy": "sma-crossover-confirmed-v1", "signal_fast_bars": 5,
+                "signal_slow_bars": 20, "exit_style": "signal"}
+        variants = [
+            validation_config_key({**base, "exit_style": "protective_only"})["key"],
+            validation_config_key({**base, "exit_style": "trailing",
+                                   "trailing_stop_pct": 0.01})["key"],
+            validation_config_key({**base, "min_hold_minutes": 15})["key"],
+            validation_config_key({**base, "resample_minutes": 5})["key"],
+        ]
+        self.assertEqual(len(set(variants + [validation_config_key(base)["key"]])), 5)
 
 
 if __name__ == "__main__":

@@ -85,5 +85,48 @@ class PortfolioResearchEndpointTests(unittest.TestCase):
         self.assertEqual(main.settings.signal_min_spread_pct, baseline_spread)
 
 
+    def test_exit_style_and_resample_overrides_reach_the_simulation(self):
+        with patch.object(main, "latest_universe_snapshot",
+                          return_value=[{"symbol": "AAPL", "selected": True}]), \
+                patch.object(main, "recent_bars", return_value=rising_bars()), \
+                patch.object(main, "latest_account_snapshot",
+                             return_value={"equity": 100_000.0}):
+            response = self.client.get("/research/portfolio", params={
+                "days": 500, "exit_style": "protective_only", "resample_minutes": 5,
+            })
+
+        self.assertEqual(response.status_code, 200)
+        body = response.json()
+        self.assertEqual(body["config"]["exit_style"], "protective_only")
+        self.assertEqual(body["config"]["resample_minutes"], 5)
+
+    def test_exit_variants_produce_distinct_validation_hashes(self):
+        base = {"days": 500}
+        with patch.object(main, "latest_universe_snapshot",
+                          return_value=[{"symbol": "AAPL", "selected": True}]), \
+                patch.object(main, "recent_bars", return_value=rising_bars()), \
+                patch.object(main, "latest_account_snapshot",
+                             return_value={"equity": 100_000.0}):
+            signal = self.client.get("/research/portfolio", params=base).json()
+            protective = self.client.get(
+                "/research/portfolio",
+                params={**base, "exit_style": "protective_only"}).json()
+
+        self.assertNotEqual(
+            signal["validation"]["config_hash"],
+            protective["validation"]["config_hash"],
+        )
+
+    def test_invalid_exit_style_returns_bad_request(self):
+        response = self.client.get(
+            "/research/portfolio", params={"exit_style": "magic"})
+        self.assertEqual(response.status_code, 400)
+
+    def test_trailing_style_requires_a_trail_distance(self):
+        response = self.client.get(
+            "/research/portfolio", params={"exit_style": "trailing"})
+        self.assertEqual(response.status_code, 400)
+
+
 if __name__ == "__main__":
     unittest.main()

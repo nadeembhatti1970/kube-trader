@@ -260,6 +260,9 @@ def research_portfolio(
     cost_bps: float | None = Query(default=None, ge=0, le=100),
     min_hold_minutes: float | None = Query(default=None, ge=0),
     exit_confirmation_spread_pct: float | None = Query(default=None, ge=0),
+    exit_style: str | None = Query(default=None),
+    trailing_stop_pct: float | None = Query(default=None, ge=0, le=1),
+    resample_minutes: int | None = Query(default=None, ge=1, le=60),
 ):
     """Portfolio-level walk-forward research over the selected watchlist.
 
@@ -267,6 +270,15 @@ def research_portfolio(
     symbol at once and reports the uncertainty around the result. Nothing here
     changes orders or settings.
     """
+    selected_exit_style = (exit_style or "signal").strip().lower()
+    if selected_exit_style not in {"signal", "protective_only", "trailing"}:
+        raise HTTPException(
+            status_code=400,
+            detail="exit_style must be signal, protective_only, or trailing")
+    if selected_exit_style == "trailing" and not (trailing_stop_pct or 0) > 0:
+        raise HTTPException(
+            status_code=400,
+            detail="trailing exit_style requires trailing_stop_pct > 0")
     if symbols:
         requested = [item.strip().upper() for item in symbols.split(",") if item.strip()]
     else:
@@ -310,6 +322,9 @@ def research_portfolio(
             "intraday_flatten_minutes": settings.intraday_flatten_minutes,
             "min_hold_minutes": min_hold_minutes or 0.0,
             "exit_confirmation_spread_pct": exit_confirmation_spread_pct or 0.0,
+            "exit_style": selected_exit_style,
+            "trailing_stop_pct": trailing_stop_pct or 0.0,
+            "resample_minutes": resample_minutes or 1,
         }
         result = simulate_portfolio(
             bars_by_symbol, config,
@@ -322,6 +337,11 @@ def research_portfolio(
             "signal_slow_bars": config["slow_bars"],
             "signal_min_spread_pct": config["min_spread_pct"],
             "signal_min_buy_rsi": config["min_buy_rsi"],
+            "min_hold_minutes": config["min_hold_minutes"],
+            "exit_confirmation_spread_pct": config["exit_confirmation_spread_pct"],
+            "exit_style": config["exit_style"],
+            "trailing_stop_pct": config["trailing_stop_pct"],
+            "resample_minutes": config["resample_minutes"],
         })
         identity = validation_config_key(candidate)
         significance = result.get("significance", {})

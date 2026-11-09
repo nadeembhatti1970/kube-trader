@@ -84,6 +84,7 @@ curl http://localhost:8000/signals/AAPL
 curl http://localhost:8000/backtests/AAPL
 curl http://localhost:8000/research/backtests/AAPL
 curl "http://localhost:8000/research/portfolio?days=5000"
+curl "http://localhost:8000/research/portfolio?days=5000&exit_style=protective_only&persist=true"
 curl http://localhost:8000/universe
 curl http://localhost:8000/account/reconciliation
 curl http://localhost:8000/account/broker
@@ -98,6 +99,19 @@ The daily history API supports `MARKET_DATA_PROVIDER=yfinance` (default) or `fin
 `/research/backtests/{symbol}` compares the configured intraday SMA rule, 20-day swing rule, and 50/200-day core rule. It uses OHLC bars, applies the intraday spread/RSI buy confirmation, simulates market signals at the next bar open, and models protective stops/targets with the stop assumed first when both are touched within one bar. Intraday entry cutoffs and end-of-day flattening use New York time and assume a 16:00 close. The report includes the strategy configuration, risk/exit settings, execution assumptions, chronological in-sample/out-of-sample metrics, and net payoff metrics including profit factor and mean winning/losing trade returns. The holdout is also split into up to three contiguous chronological subperiods for descriptive stability checks; the strategy is fixed, positions can carry across boundaries, and these are not independent samples or separately trained models. Out-of-sample results are recomputed with 5 and 10 additional basis points charged per side. These cost stresses test sensitivity; they do not estimate actual execution costs. Defaults use 70% of each series for in-sample and 5 basis points per side; query parameters can override `train_fraction`, `cost_bps`, and daily `days`. Daily evaluation uses up to 1,260 bars; intraday evaluation uses up to `INTRADAY_BACKTEST_BARS` locally collected bars. Results still approximate fills, costs, and market hours; use them for research, not as evidence of guaranteed profitability.
 
 `/research/portfolio` is the portfolio-level counterpart. It simulates every selected watchlist symbol together under the live capital and risk constraints — intraday pool budget, per-symbol and per-sector caps, statement cash, max positions, 1% risk sizing, open-risk cap, entry start/cutoff, end-of-day flattening, and per-side costs — and returns portfolio equity, drawdown, Sharpe, average exposure, turnover, cost drag, exit-reason counts, an equal-weight buy-and-hold benchmark, and the bootstrap confidence interval and minimum detectable edge for the mean net trade return. Query parameters can override `fast_bars`, `slow_bars`, `min_spread_pct`, `min_buy_rsi`, `cost_bps`, `min_hold_minutes`, and `exit_confirmation_spread_pct`, so candidate variants can be compared without changing runtime settings. `persist=true` stores the verdict in `strategy_validation` under a hash of the strategy parameters; `REQUIRE_VALIDATED_STRATEGY` can then require that record before new entries. A positive mean alone is never presented as validated: the interval must exclude zero and the sample must meet `VALIDATION_MIN_TRADES`.
+
+Exit and sampling variants can be compared with the same tooling. `exit_style` accepts `signal` (exit on the reverse crossover), `protective_only` (stop, target, and end-of-day flatten only), or `trailing` (a protective stop ratcheted behind the high, requiring `trailing_stop_pct`). `resample_minutes` aggregates stored minute bars before signals, which tests a slower signal that trades less and pays less cost. `min_hold_minutes` and `exit_confirmation_spread_pct` are also available. The benchmark reports its return both outright and scaled to the strategy's average exposure, so a mostly-cash run is not credited with avoiding a market decline.
+
+### Historical backfill
+
+`/research/portfolio` can only use bars already stored in PostgreSQL. Seed minute history with the backfill service:
+
+```sh
+python -m app.services.backfill --days 30
+docker compose exec api python -m app.services.backfill --days 30
+```
+
+It writes to the `bars` table only and never publishes to the `market.bars` stream, so backfilled history cannot trigger signals, backtests, or orders. Use `--symbols AAPL,MSFT` to override the universe and `--feed sip|iex` to override the feed. Reruns are idempotent; existing bars are updated in place.
 
 Trade reports group closed slices by entry app version as well as effective strategy/risk configuration. Orders record configured risk controls and the calculated order sizing; trades without recorded provenance remain `unknown` and are not backfilled from current settings.
 

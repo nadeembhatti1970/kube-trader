@@ -145,6 +145,33 @@ def record_bar(bar: dict):
         """, bar)
 
 
+def save_bars(bars: list[dict], batch_size: int = 5000) -> int:
+    """Bulk insert/update historical bars.
+
+    Used by the research backfill only. It writes to PostgreSQL and never publishes
+    to the live ``market.bars`` stream, so history cannot trigger live signals.
+    """
+    if not bars:
+        return 0
+    if batch_size < 1:
+        raise ValueError("batch_size must be at least 1")
+    saved = 0
+    with connect() as db:
+        cursor = db.cursor()
+        for start in range(0, len(bars), batch_size):
+            chunk = bars[start:start + batch_size]
+            cursor.executemany("""
+                INSERT INTO bars(symbol, ts, open, high, low, close, volume)
+                VALUES (%(symbol)s, %(ts)s, %(open)s, %(high)s, %(low)s,
+                        %(close)s, %(volume)s)
+                ON CONFLICT(symbol, ts) DO UPDATE SET
+                  open=excluded.open, high=excluded.high, low=excluded.low,
+                  close=excluded.close, volume=excluded.volume
+            """, chunk)
+            saved += len(chunk)
+    return saved
+
+
 def recent_closes(symbol: str, limit: int) -> list[dict]:
     with connect() as db:
         rows = db.execute(
