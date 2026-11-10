@@ -33,13 +33,14 @@ from app.database import (bot_origin_symbols, broker_activity_sync_status,
                           symbol_session_bar_count, sync_managed_orders,
                           update_broker_activity_sync, update_latest_account_orders,
                           update_order)
+from app.portfolio_daily_sim import daily_config, daily_validation_params
 from app.settings import get_settings, strategy_config
 from app.streams import SIGNAL_STREAM, client, ensure_group, read_group
 from app.trade_accounting import (build_realized_trade_report, reconcile_open_quantities,
                                  minutes_to_close, pool_session_realized,
                                  symbol_entry_block)
 from app.universe import sector_for_symbol
-from app.validation import validation_config_key
+from app.validation import config_key, validation_config_key
 
 logging.basicConfig(level=logging.INFO)
 log = logging.getLogger("execution")
@@ -95,6 +96,9 @@ def protection_model(pool: str | None, fractional: bool, stops: list[dict],
     stop_tif = stops[0].get("time_in_force") if stops else None
     if pool is None:
         return {"model": "unmanaged", "stop_present": stop_present,
+                "stop_time_in_force": stop_tif, "target_management": "none"}
+    if pool == "core_index":
+        return {"model": "passive_core", "stop_present": stop_present,
                 "stop_time_in_force": stop_tif, "target_management": "none"}
     if pool == "intraday" and fractional:
         return {
@@ -509,6 +513,96 @@ def flatten_intraday_positions(client_api: TradingClient, positions) -> list[str
     return closed
 
 
+def rebalance_core_index(client_api: TradingClient, account, positions) -> list[dict]:
+    """Track the passive core index sleeve toward its target within a band.
+
+    The sleeve is a simple day market order with no protective legs. It is not
+    a strategy entry, so it bypasses the signal gate and the per-symbol cap.
+    """
+    if not settings.core_index_enabled or settings.core_index_pct <= 0:
+        return []
+    symbol = settings.core_index_symbol.upper()
+    try:
+        if not client_api.get_clock().is_open:
+            return []
+    except Exception:
+        log.exception("Unable to read the clock for the core index sleeve")
+        return []
+    equity = float(account.equity)
+    target = equity * settings.core_index_pct
+    if target <= 0:
+        return []
+    position = next((item for item in positions if item.symbol == symbol), None)
+    current_value = abs(float(position.market_value)) if position else 0.0
+    current_qty = abs(float(position.qty)) if position else 0.0
+    delta = target - current_value
+    minimum = max(settings.core_index_min_trade_notional,
+                  target * settings.core_index_rebalance_band_pct)
+    if abs(delta) < minimum:
+        return []
+    price = float(getattr(position, "current_price", 0) or 0) if position else 0.0
+    now = datetime.now(timezone.utc)
+    trades = []
+    if delta > 0:
+        notional = round(min(delta, float(account.cash)), 2)
+        if notional < max(settings.core_index_min_trade_notional, 1.0):
+            return []
+        client_order_id = "kt-core-" + uuid.uuid4().hex[:24]
+        if not reserve_order(client_order_id, "core-index-rebalance", symbol, 0.0,
+                             "core_index", 0.0, now, price,
+                             {"strategy": "passive-core-index",
+                              "target_pct": settings.core_index_pct}):
+            return []
+        request = MarketOrderRequest(
+            symbol=symbol, notional=notional, side=OrderSide.BUY,
+            type=OrderType.MARKET, time_in_force=TimeInForce.DAY,
+            client_order_id=client_order_id,
+        )
+        side = "buy"
+        amount = notional
+    else:
+        if price <= 0 or current_qty <= 0:
+            return []
+        qty = round(min(current_qty, abs(delta) / price), 4)
+        if qty <= 0:
+            return []
+        client_order_id = "kt-core-" + uuid.uuid4().hex[:24]
+        if not reserve_order(client_order_id, "core-index-rebalance", symbol, qty,
+                             "core_index", 0.0, now, price,
+                             {"strategy": "passive-core-index",
+                              "target_pct": settings.core_index_pct}):
+            return []
+        request = MarketOrderRequest(
+            symbol=symbol, qty=qty, side=OrderSide.SELL,
+            type=OrderType.MARKET, time_in_force=TimeInForce.DAY,
+            client_order_id=client_order_id,
+        )
+        side = "sell"
+        amount = round(qty * price, 2)
+    try:
+        order = client_api.submit_order(request)
+    except Exception:
+        log.exception("Core index rebalance failed for %s", symbol)
+        return []
+    status = str(getattr(order.status, "value", order.status)).lower()
+    update_order(
+        client_order_id, str(order.id), status,
+        submitted_at=getattr(order, "submitted_at", None),
+        filled_at=getattr(order, "filled_at", None),
+        filled_qty=(float(order.filled_qty)
+                    if getattr(order, "filled_qty", None) is not None else None),
+        filled_avg_price=(float(order.filled_avg_price)
+                          if getattr(order, "filled_avg_price", None) is not None else None),
+        order_type=broker_order_type(order),
+        fees=(float(order.fees) if getattr(order, "fees", None) is not None else None),
+    )
+    trades.append({"symbol": symbol, "side": side, "amount": amount})
+    log.warning(
+        "Core index sleeve %s %s: target %.2f, current %.2f, amount %.2f",
+        "bought" if side == "buy" else "sold", symbol, target, current_value, amount)
+    return trades
+
+
 def notify_admin(message: str):
     if not settings.alert_webhook_url:
         log.critical("Alert webhook is not configured: %s", message)
@@ -587,6 +681,7 @@ def reconcile(client_api: TradingClient):
     exposures = {pool: 0.0 for pool in POOL_WEIGHTS}
     sector_exposures = {}
     open_risk = 0.0
+    core_index_exposure = 0.0
     for position in positions:
         symbol = position.symbol
         qty = float(position.qty)
@@ -607,9 +702,11 @@ def reconcile(client_api: TradingClient):
             assigned_pool, fractional_position,
             protective_orders.get(symbol, []), target_orders.get(symbol, []))
         broker_positions.append(position_report)
-        pool = pool_by_symbol.get(symbol, "core")
+        pool = "core" if assigned_pool == "core_index" else (assigned_pool or "core")
         exposures[pool] += abs(float(position.market_value))
-        if symbol in known and qty > 0:
+        if assigned_pool == "core_index":
+            core_index_exposure += abs(float(position.market_value))
+        if symbol in known and qty > 0 and assigned_pool != "core_index":
             risk_pct = managed_order_stop_loss_pct(symbol, pool)
             if risk_pct is None:
                 risk_pct = default_stop_loss_pct(pool)
@@ -617,6 +714,7 @@ def reconcile(client_api: TradingClient):
         sector = sector_for_symbol(symbol, settings)
         sector_exposures[sector] = sector_exposures.get(sector, 0.0) + abs(float(position.market_value))
         if (settings.stop_management_enabled and symbol in pool_by_symbol
+                and assigned_pool != "core_index"
                 and (symbol, close_side.value) not in protected):
             stop_pct = managed_order_stop_loss_pct(symbol, pool)
             if stop_pct is None:
@@ -719,6 +817,18 @@ def reconcile(client_api: TradingClient):
              "max_portfolio_open_risk_pct": settings.max_portfolio_open_risk_pct,
              "protection_summary": dict(sorted(protected_models.items())),
              "capital_utilization": utilization,
+             "core_index_sleeve": {
+                 "enabled": settings.core_index_enabled,
+                 "symbol": settings.core_index_symbol.upper(),
+                 "target_pct": settings.core_index_pct,
+                 "target_equity": (equity * settings.core_index_pct
+                                   if settings.core_index_enabled else 0.0),
+                 "exposure": core_index_exposure,
+                 "utilization_pct": (
+                     core_index_exposure / (equity * settings.core_index_pct) * 100
+                     if settings.core_index_enabled and equity and settings.core_index_pct
+                     else None),
+             },
              "warnings": warnings,
              "allocations": allocations, "sector_exposures": sector_exposures}
     log_reconciliation_warnings(warnings)
@@ -969,6 +1079,9 @@ def place_entry(client_api: TradingClient, event: dict, signal_id: str,
     if event.get("action") != "buy" or risk["halted"]:
         return False
     symbol = event["symbol"]
+    if settings.core_index_enabled and symbol.upper() == settings.core_index_symbol.upper():
+        log.info("Ignoring active entry for passive core sleeve symbol %s", symbol)
+        return False
     clock = client_api.get_clock()
     if not clock.is_open:
         log.info("Ignoring %s entry because the NYSE market is closed", symbol)
@@ -982,16 +1095,27 @@ def place_entry(client_api: TradingClient, event: dict, signal_id: str,
         return False
     session_now = datetime.now(NY)
     if settings.require_validated_strategy:
-        config_key = validation_config_key(strategy_config(settings))["key"]
+        if pool == "intraday":
+            validation_key = validation_config_key(strategy_config(settings))["key"]
+        else:
+            daily_candidate = daily_config(
+                settings, risk["equity"],
+                mandate=settings.daily_validation_mandate,
+                regime_filter_enabled=settings.regime_filter_enabled,
+                regime_sma=settings.regime_sma,
+            )
+            validation_key = config_key(
+                "daily-swing-core",
+                daily_validation_params(daily_candidate))["key"]
         try:
-            record = latest_strategy_validation(config_key)
+            record = latest_strategy_validation(validation_key)
         except Exception:
-            log.exception("Unable to read strategy validation for %s", config_key)
+            log.exception("Unable to read strategy validation for %s", validation_key)
             record = None
         if not (record and record.get("validated")):
             log.warning(
-                "Ignoring entry for %s: strategy configuration %s has no validated "
-                "out-of-sample record", symbol, config_key)
+                "Ignoring %s entry: %s configuration %s has no validated "
+                "out-of-sample record", symbol, pool, validation_key)
             return False
     if pool == "intraday" and settings.intraday_entry_start_minutes > 0:
         elapsed = minutes_since_open(session_now)
@@ -1346,8 +1470,9 @@ def main():
         if time.monotonic() - last_reconcile >= settings.reconcile_interval_seconds:
             reconcile_started = time.monotonic()
             try:
-                _, positions, risk, open_orders = cached_risk_view(
+                account, positions, risk, open_orders = cached_risk_view(
                     client_api, max_age_seconds=0.0)
+                rebalance_core_index(client_api, account, positions)
                 check_software_take_profits(client_api, positions)
                 flatten_intraday_positions(client_api, positions)
                 refresh_tracked_order_statuses(client_api, open_orders)

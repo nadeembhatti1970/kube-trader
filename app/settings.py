@@ -46,6 +46,14 @@ class Settings(BaseSettings):
     intraday_allocation_pct: float = 0.20
     swing_allocation_pct: float = 0.30
     core_allocation_pct: float = 0.50
+    core_index_enabled: bool = False
+    core_index_symbol: str = "SPY"
+    core_index_pct: float = 0.0
+    core_index_rebalance_band_pct: float = 0.05
+    core_index_min_trade_notional: float = 500.0
+    regime_filter_enabled: bool = False
+    regime_symbol: str = "SPY"
+    regime_sma: int = 200
     signal_fast_bars: int = 5
     signal_slow_bars: int = 20
     signal_min_spread_pct: float = 0.001
@@ -76,6 +84,7 @@ class Settings(BaseSettings):
     validation_min_trades: int = 30
     validation_confidence: float = 0.95
     validation_mandate: str = "relative"
+    daily_validation_mandate: str = "relative"
     portfolio_backtest_max_symbols: int = 40
     alert_webhook_url: str = ""
     log_level: str = "INFO"

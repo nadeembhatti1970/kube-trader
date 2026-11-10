@@ -442,9 +442,9 @@ def research_daily_portfolio(
     cost_bps: float | None = Query(default=None, ge=0, le=100),
     split_fraction: float | None = Query(default=None, ge=0.5, le=0.9),
     persist: bool = Query(default=False),
-    regime_filter: bool = Query(default=False),
-    regime_sma: int = Query(default=200, ge=20, le=300),
-    regime_symbol: str = Query(default="SPY"),
+    regime_filter: bool | None = Query(default=None),
+    regime_sma: int | None = Query(default=None, ge=20, le=300),
+    regime_symbol: str | None = Query(default=None),
     starting_equity: float | None = Query(default=None, ge=1_000, le=100_000_000),
     mandate: str | None = Query(default=None),
 ):
@@ -453,10 +453,14 @@ def research_daily_portfolio(
     Runs both pools together under the live pool budgets, concentration caps,
     risk sizing, and costs. It never places orders or changes settings.
     """
-    selected_mandate = (mandate or settings.validation_mandate).strip().lower()
+    selected_mandate = (mandate or settings.daily_validation_mandate).strip().lower()
     if selected_mandate not in {"relative", "absolute"}:
         raise HTTPException(
             status_code=400, detail="mandate must be relative or absolute")
+    selected_regime = (settings.regime_filter_enabled
+                       if regime_filter is None else regime_filter)
+    selected_sma = settings.regime_sma if regime_sma is None else regime_sma
+    selected_symbol = (regime_symbol or settings.regime_symbol).upper()
     if symbols:
         requested = [item.strip().upper() for item in symbols.split(",") if item.strip()]
     else:
@@ -477,13 +481,13 @@ def research_daily_portfolio(
                 status_code=404,
                 detail="No stored daily bars; run the backfill with --timeframe day")
         regime_bars = []
-        if regime_filter:
-            regime_bars = recent_daily_bars(regime_symbol.upper(), days)
-            if len(regime_bars) < regime_sma + 1:
+        if selected_regime:
+            regime_bars = recent_daily_bars(selected_symbol, days)
+            if len(regime_bars) < selected_sma + 1:
                 raise HTTPException(
                     status_code=404,
                     detail=(f"Not enough stored daily bars for regime symbol "
-                            f"{regime_symbol.upper()}; backfill it first"))
+                            f"{selected_symbol}; backfill it first"))
         if starting_equity is None:
             snapshot = latest_account_snapshot()
             if snapshot is None:
@@ -500,8 +504,8 @@ def research_daily_portfolio(
             starting_equity,
             cost_bps=cost_bps,
             split_fraction=(split_fraction if split_fraction is not None else 0.7),
-            regime_filter_enabled=regime_filter,
-            regime_sma=regime_sma,
+            regime_filter_enabled=selected_regime,
+            regime_sma=selected_sma,
             mandate=selected_mandate,
         )
         result = simulate_daily_portfolio(

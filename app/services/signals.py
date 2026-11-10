@@ -44,7 +44,7 @@ def daily_bars_for_signal(symbol: str) -> list[dict]:
         if cached["bars"] is not None or now - cached["attempted_at"] < 900:
             return cached["bars"] or []
     try:
-        fetched = get_daily_bars(symbol, 260, settings)
+        fetched = get_daily_bars(symbol, max(260, settings.regime_sma + 60), settings)
         bars = [bar for bar in fetched if date.fromisoformat(bar["time"]) < today]
         DAILY_CACHE[symbol] = {"session": today, "attempted_at": now, "bars": bars}
         return bars
@@ -52,6 +52,27 @@ def daily_bars_for_signal(symbol: str) -> list[dict]:
         DAILY_CACHE[symbol] = {"session": today, "attempted_at": now, "bars": None}
         log.exception("Could not refresh daily bars for %s strategies", symbol)
         return []
+
+
+def regime_allows_entry() -> bool:
+    """Block new daily entries while the regime symbol is below its SMA.
+
+    Uses completed daily bars and fails closed when the regime cannot be evaluated.
+    """
+    if not settings.regime_filter_enabled:
+        return True
+    try:
+        bars = daily_bars_for_signal(settings.regime_symbol.upper())
+        closes = [float(bar["close"]) for bar in bars]
+        period = settings.regime_sma
+        if len(closes) < period + 1:
+            log.warning("Regime history for %s is too short; blocking new daily entries",
+                        settings.regime_symbol)
+            return False
+        return closes[-1] > sum(closes[-period:]) / period
+    except Exception:
+        log.exception("Unable to evaluate the market regime; blocking new daily entries")
+        return False
 
 
 def daily_strategy_state(bars: list[dict], pool: str) -> tuple[bool, bool, float]:
@@ -116,6 +137,10 @@ def daily_signals(symbol: str, price: float, timestamp: str) -> list[dict]:
             changed = prior_state != current
             save_horizon_strategy_state(symbol, pool, current, bar_date)
             if not changed:
+                continue
+            if current and not regime_allows_entry():
+                log.info("Suppressing daily %s buy for %s: market regime is risk-off",
+                         pool, symbol)
                 continue
             stop_loss_pct = (min(max(settings.swing_atr_multiple * atr_fraction, 0.005), 0.25)
                              if pool == "swing" else settings.core_stop_loss_pct)

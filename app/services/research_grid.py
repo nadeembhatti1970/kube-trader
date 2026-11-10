@@ -306,11 +306,15 @@ def main():
     parser.add_argument("--starting-equity", type=float, default=None,
                         help="Override the capital base; defaults to live account equity")
     parser.add_argument("--mandate", choices=["relative", "absolute"],
-                        default=settings.validation_mandate,
-                        help="relative also requires a positive benchmark-relative edge")
+                        default=None,
+                        help="relative also requires a positive benchmark-relative edge; "
+                             "defaults to the mandate for the selected mode")
     parser.add_argument("--persist", action="store_true",
                         help="Store each verdict in strategy_validation")
     args = parser.parse_args()
+    mandate = args.mandate or (
+        settings.daily_validation_mandate if args.mode == "daily"
+        else settings.validation_mandate)
     if not 0.5 <= args.split_fraction <= 0.9:
         raise SystemExit("--split-fraction must be between 0.5 and 0.9")
     if args.starting_equity is not None and args.starting_equity < 1_000:
@@ -349,7 +353,7 @@ def main():
                 "backfill it first")
         base_config = daily_config(
             settings, starting_equity, cost_bps=args.cost_bps,
-            split_fraction=args.split_fraction, mandate=args.mandate)
+            split_fraction=args.split_fraction, mandate=mandate)
         variants = build_daily_variants(regime_smas)
         sectors = {symbol: sector_for_symbol(symbol, settings)
                    for symbol in bars_by_symbol}
@@ -385,7 +389,7 @@ def main():
             "intraday_entry_cutoff_minutes": settings.intraday_entry_cutoff_minutes,
             "intraday_flatten_minutes": settings.intraday_flatten_minutes,
             "split_fraction": args.split_fraction,
-            "mandate": args.mandate,
+            "mandate": mandate,
         }
         variants = build_variants(
             _floats(args.spreads), _floats(args.rsis),
@@ -406,10 +410,10 @@ def main():
     print_table(rows)
     promoted = [row for row in rows if row["validated"]]
     mandate_note = ("and out-of-sample excess return over the same-exposure benchmark "
-                    "also above zero" if args.mandate == "relative"
+                    "also above zero" if mandate == "relative"
                     else "only; absolute mandate ignores the benchmark test")
     print(f"\npromoted {len(promoted)} of {len(rows)} variants under the "
-          f"{args.mandate} mandate (out-of-sample trade CI above zero, at least "
+          f"{mandate} mandate (out-of-sample trade CI above zero, at least "
           f"{args.min_oos_trades} trades {mandate_note})")
     if promoted:
         print("strictly promote on out-of-sample evidence only; this is not a guarantee.")

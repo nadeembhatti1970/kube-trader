@@ -6,6 +6,47 @@ from app.services import signals
 from app.settings import Settings, strategy_config
 
 
+class RegimeFilterTests(unittest.TestCase):
+    def bars(self, rising=True, count=30):
+        result = []
+        for index in range(count):
+            close = 100.0 + index if rising else 200.0 - index
+            result.append({"time": f"2026-01-{index + 1:02d}", "close": close})
+        return result
+
+    def run_daily(self, bars, state, enabled=True, sma=20):
+        with patch.object(signals.settings, "regime_filter_enabled", enabled), \
+                patch.object(signals.settings, "regime_symbol", "SPY"), \
+                patch.object(signals.settings, "regime_sma", sma), \
+                patch.object(signals, "daily_bars_for_signal", return_value=bars), \
+                patch.object(signals, "daily_strategy_state", return_value=state), \
+                patch.object(signals, "horizon_strategy_state", return_value=None), \
+                patch.object(signals, "save_horizon_strategy_state"):
+            return signals.daily_signals(
+                "AAPL", 100.0, "2026-01-30T15:00:00+00:00")
+
+    def test_risk_off_blocks_new_daily_buys(self):
+        result = self.run_daily(self.bars(rising=False), (False, True, 0.02))
+        self.assertEqual(result, [])
+
+    def test_risk_on_allows_daily_buys(self):
+        result = self.run_daily(self.bars(rising=True), (False, True, 0.02))
+        self.assertEqual([item["action"] for item in result], ["buy", "buy"])
+
+    def test_disabled_filter_allows_buys(self):
+        result = self.run_daily(
+            self.bars(rising=False), (False, True, 0.02), enabled=False)
+        self.assertEqual([item["action"] for item in result], ["buy", "buy"])
+
+    def test_risk_off_still_allows_daily_sells(self):
+        result = self.run_daily(self.bars(rising=False), (True, False, 0.02))
+        self.assertEqual([item["action"] for item in result], ["sell", "sell"])
+
+    def test_short_regime_history_fails_closed(self):
+        result = self.run_daily(self.bars(rising=True, count=10), (False, True, 0.02))
+        self.assertEqual(result, [])
+
+
 class EntryConfirmedTests(unittest.TestCase):
     def confirmed(self, fast, slow, rsi_value, spread=0.001, min_rsi=55.0):
         with patch.object(signals.settings, "signal_min_spread_pct", spread), \

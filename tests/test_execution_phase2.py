@@ -166,6 +166,79 @@ class LimitFallbackTests(unittest.TestCase):
         self.assertEqual(result.id, "limit-1")
 
 
+class CoreIndexSleeveTests(unittest.TestCase):
+    class Client:
+        def __init__(self, is_open=True):
+            self.is_open = is_open
+            self.requests = []
+
+        def get_clock(self):
+            return SimpleNamespace(is_open=self.is_open)
+
+        def submit_order(self, request):
+            self.requests.append(request)
+            return SimpleNamespace(
+                id="core-1", status="accepted", submitted_at=None, filled_at=None,
+                filled_qty=None, filled_avg_price=None)
+
+    def run_sleeve(self, equity, cash, positions, is_open=True, **overrides):
+        values = {
+            "core_index_enabled": True,
+            "core_index_pct": 0.30,
+            "core_index_symbol": "SPY",
+            "core_index_rebalance_band_pct": 0.05,
+            "core_index_min_trade_notional": 500.0,
+        }
+        values.update(overrides)
+        client = self.Client(is_open)
+        with patch.multiple(execution.settings, **values), \
+                patch.object(execution, "reserve_order", return_value=True), \
+                patch.object(execution, "update_order"):
+            trades = execution.rebalance_core_index(
+                client, SimpleNamespace(equity=str(equity), cash=str(cash)),
+                positions)
+        return client, trades
+
+    def test_buys_toward_the_target_with_a_notional_order(self):
+        client, trades = self.run_sleeve(100_000, 100_000, [])
+
+        self.assertEqual(len(client.requests), 1)
+        request = client.requests[0]
+        self.assertEqual(request.side.value, "buy")
+        self.assertAlmostEqual(float(request.notional), 30_000.0)
+        self.assertEqual(request.time_in_force.value, "day")
+        self.assertEqual(trades[0]["side"], "buy")
+
+    def test_no_trade_inside_the_rebalance_band(self):
+        position = SimpleNamespace(
+            symbol="SPY", market_value="29500", qty="10", current_price="295")
+        client, trades = self.run_sleeve(100_000, 0, [position])
+
+        self.assertEqual(client.requests, [])
+        self.assertEqual(trades, [])
+
+    def test_sells_the_excess_above_target(self):
+        position = SimpleNamespace(
+            symbol="SPY", market_value="34000", qty="10", current_price="400")
+        client, trades = self.run_sleeve(100_000, 0, [position])
+
+        self.assertEqual(len(client.requests), 1)
+        request = client.requests[0]
+        self.assertEqual(request.side.value, "sell")
+        self.assertAlmostEqual(float(request.qty), 10.0)
+        self.assertEqual(trades[0]["side"], "sell")
+
+    def test_disabled_or_closed_market_does_nothing(self):
+        client, trades = self.run_sleeve(
+            100_000, 100_000, [], core_index_enabled=False)
+        self.assertEqual(client.requests, [])
+        self.assertEqual(trades, [])
+
+        client, trades = self.run_sleeve(100_000, 100_000, [], is_open=False)
+        self.assertEqual(client.requests, [])
+        self.assertEqual(trades, [])
+
+
 class CapitalUtilizationTests(unittest.TestCase):
     def test_reports_invested_cash_and_pool_use(self):
         positions = [SimpleNamespace(market_value="20000")]
@@ -249,6 +322,12 @@ class ProtectionModelTests(unittest.TestCase):
             [{"order_type": "limit"}])
         self.assertEqual(model["model"], "whole_share_day_bracket")
         self.assertEqual(model["target_management"], "broker_oco")
+
+    def test_passive_core_sleeve_has_no_protective_model(self):
+        model = execution.protection_model("core_index", False, [], [])
+        self.assertEqual(model["model"], "passive_core")
+        self.assertFalse(model["stop_present"])
+        self.assertEqual(model["target_management"], "none")
 
     def test_swing_core_reports_the_gtc_oto_stop(self):
         model = execution.protection_model(

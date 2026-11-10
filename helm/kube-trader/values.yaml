@@ -43,6 +43,16 @@ config:
   intradayAllocationPct: "0.20"
   swingAllocationPct: "0.30"
   coreAllocationPct: "0.50"
+  # Paper deployment: hold 30% of equity in a passive SPY sleeve and block new
+  # daily buys while SPY is below its 100-day SMA.
+  coreIndexEnabled: "true"
+  coreIndexSymbol: SPY
+  coreIndexPct: "0.30"
+  coreIndexRebalanceBandPct: "0.05"
+  coreIndexMinTradeNotional: "500"
+  regimeFilterEnabled: "true"
+  regimeSymbol: SPY
+  regimeSma: "100"
   signalFastBars: "5"
   signalSlowBars: "20"
   signalMinSpreadPct: "0.001"
@@ -73,6 +83,7 @@ config:
   validationMinTrades: "30"
   validationConfidence: "0.95"
   validationMandate: relative
+  dailyValidationMandate: absolute
   portfolioBacktestMaxSymbols: "40"
 persistence:
   enabled: true
