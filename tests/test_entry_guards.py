@@ -19,6 +19,9 @@ class FakeClient:
     def get_orders(self, _request):
         return []
 
+    def get_asset(self, _symbol):
+        return SimpleNamespace(fractionable=True)
+
     def submit_order(self, _request):
         return SimpleNamespace(
             id="broker-1", status="accepted", submitted_at=None, filled_at=None,
@@ -118,7 +121,7 @@ class PlaceEntryGuardTests(unittest.TestCase):
             "reconciliation": {"allocations": {"intraday": {"remaining": 20_000.0}}},
         }
 
-    def run_entry(self, **overrides):
+    def run_entry(self, client=None, **overrides):
         defaults = {
             "intraday_entry_start_minutes": 0,
             "intraday_entry_cutoff_minutes": 0,
@@ -137,7 +140,8 @@ class PlaceEntryGuardTests(unittest.TestCase):
             patcher.start()
             self.addCleanup(patcher.stop)
         return execution.place_entry(
-            FakeClient(), self.event, "signal-1", object(), [], self.risk)
+            client or FakeClient(), self.event, "signal-1", object(), [],
+            self.risk)
 
     def test_burst_limit_blocks_the_entry_without_reserving_an_order(self):
         with patch("app.services.execution.entry_count_since", return_value=3), \
@@ -164,6 +168,51 @@ class PlaceEntryGuardTests(unittest.TestCase):
             self.run_entry(intraday_daily_loss_limit_pct=0.005)
 
         self.assertIn("session loss limit", captured.output[0])
+
+    def test_non_fractionable_asset_falls_back_to_whole_shares(self):
+        class RecordingClient(FakeClient):
+            def __init__(self, fractionable):
+                self.fractionable = fractionable
+                self.requests = []
+
+            def get_asset(self, _symbol):
+                return SimpleNamespace(fractionable=self.fractionable)
+
+            def submit_order(self, request):
+                self.requests.append(request)
+                return super().submit_order(request)
+
+        client = RecordingClient(False)
+        with patch("app.services.execution.entry_count_since", return_value=0):
+            self.run_entry(client=client)
+
+        self.assertEqual(len(client.requests), 1)
+        request = client.requests[0]
+        self.assertEqual(request.order_class.value, "bracket")
+        self.assertTrue(float(request.qty).is_integer())
+
+    def test_fractionable_asset_uses_a_fractional_simple_entry(self):
+        class RecordingClient(FakeClient):
+            def __init__(self):
+                self.requests = []
+
+            def get_asset(self, _symbol):
+                return SimpleNamespace(fractionable=True)
+
+            def submit_order(self, request):
+                self.requests.append(request)
+                return super().submit_order(request)
+
+        client = RecordingClient()
+        self.event["price"] = 300.0
+        with patch("app.services.execution.entry_count_since", return_value=0), \
+                patch("app.services.execution.ensure_fractional_stop"):
+            self.run_entry(client=client)
+
+        self.assertEqual(len(client.requests), 1)
+        request = client.requests[0]
+        self.assertIsNone(request.order_class)
+        self.assertFalse(float(request.qty).is_integer())
 
     def test_low_bar_coverage_blocks_the_entry(self):
         with patch("app.services.execution.minutes_since_open", return_value=100.0), \

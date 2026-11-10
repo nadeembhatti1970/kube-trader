@@ -125,6 +125,19 @@ class DailySimulationTests(unittest.TestCase):
         self.assertTrue(_meaningful_quantity(25, 50))
         self.assertTrue(_meaningful_quantity(1, 1))
 
+    def test_fractional_sizing_is_scale_invariant(self):
+        closes = ([100.0] * 30 + [100.0 + index for index in range(21)]
+                  + [120.0 - 0.5 * index for index in range(1, 25)])
+        small = simulate_daily_portfolio(
+            {"AAPL": daily(closes)}, {**BASE, "starting_equity": 50_000.0})
+        large = simulate_daily_portfolio(
+            {"AAPL": daily(closes)}, {**BASE, "starting_equity": 100_000.0})
+
+        self.assertEqual(
+            [round(trade["net_return_pct"], 9) for trade in small["trades"]],
+            [round(trade["net_return_pct"], 9) for trade in large["trades"]],
+        )
+
     def test_starting_equity_is_required(self):
         with self.assertRaises(ValueError):
             simulate_daily_portfolio({"AAPL": daily([100.0] * 30)},

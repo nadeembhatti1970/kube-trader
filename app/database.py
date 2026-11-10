@@ -860,6 +860,20 @@ def managed_order_id(symbol: str, pool: str):
     return row["broker_order_id"] if row else None
 
 
+def managed_order_take_profit_price(symbol: str, pool: str):
+    """Recorded take-profit price for the latest managed entry, if any."""
+    with connect() as db:
+        row = db.execute("""
+          SELECT (strategy_config->>'submitted_take_profit_price')::double precision AS target
+          FROM orders
+          WHERE symbol=%s AND pool=%s AND side='buy'
+            AND strategy_config ? 'submitted_take_profit_price'
+            AND status IN ('accepted','filled','new','partially_filled','pending_new')
+          ORDER BY created_at DESC LIMIT 1
+        """, (symbol, pool)).fetchone()
+    return float(row["target"]) if row and row["target"] is not None else None
+
+
 def managed_order_stop_loss_pct(symbol: str, pool: str):
     with connect() as db:
         row = db.execute("""

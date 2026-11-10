@@ -63,6 +63,9 @@ config:
   entryOrderType: market
   entryLimitOffsetBps: "10"
   limitOrderTimeoutSeconds: "15"
+  fractionalSharesEnabled: "true"
+  fractionalQtyDecimals: "4"
+  fractionalFillTimeoutSeconds: "10"
   minEntryBarCoveragePct: "0"
   requireValidatedStrategy: "false"
   validationMinTrades: "30"

@@ -36,6 +36,9 @@ data:
   ENTRY_ORDER_TYPE: {{ .Values.config.entryOrderType | quote }}
   ENTRY_LIMIT_OFFSET_BPS: {{ .Values.config.entryLimitOffsetBps | quote }}
   LIMIT_ORDER_TIMEOUT_SECONDS: {{ .Values.config.limitOrderTimeoutSeconds | quote }}
+  FRACTIONAL_SHARES_ENABLED: {{ .Values.config.fractionalSharesEnabled | quote }}
+  FRACTIONAL_QTY_DECIMALS: {{ .Values.config.fractionalQtyDecimals | quote }}
+  FRACTIONAL_FILL_TIMEOUT_SECONDS: {{ .Values.config.fractionalFillTimeoutSeconds | quote }}
   MIN_ENTRY_BAR_COVERAGE_PCT: {{ .Values.config.minEntryBarCoveragePct | quote }}
   REQUIRE_VALIDATED_STRATEGY: {{ .Values.config.requireValidatedStrategy | quote }}
   VALIDATION_MIN_TRADES: {{ .Values.config.validationMinTrades | quote }}

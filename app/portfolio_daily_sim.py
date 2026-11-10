@@ -30,6 +30,7 @@ DEFAULT_CONFIG = {
     "max_sector_exposure_pct": 0.25,
     "max_open_positions": 20,
     "max_shares_per_order": 100,
+    "fractional_shares": True,
     "cost_bps_per_side": 5.0,
     "split_fraction": 0.7,
     # Risk-off regime filter: block new entries while the regime symbol closed
@@ -160,13 +161,15 @@ def _prepare(bars: list[dict], config: dict) -> dict:
     }
 
 
-def _meaningful_quantity(qty: int, intended_qty: int) -> bool:
+def _meaningful_quantity(qty: float, intended_qty: float,
+                         fractional: bool = False) -> bool:
     """Reject residual positions below half the intended size.
 
     Tiny leftovers otherwise consume a slot and make the simulation depend on
     small changes in account equity.
     """
-    return qty >= 1 and qty * 2 >= max(1, intended_qty)
+    minimum = 1e-4 if fractional else 1
+    return qty >= minimum and qty * 2 >= max(minimum, intended_qty)
 
 
 def _regime_series(bars: list[dict], period: int) -> tuple[list[date], list[bool | None]]:
@@ -372,16 +375,27 @@ def simulate_daily_portfolio(bars_by_symbol: dict[str, list[dict]],
                 continue
             per_share_risk = max(price * stop_pct, 0.01)
             risk_budget = equity * min(float(effective["max_trade_risk_pct"]), 0.01)
-            risk_qty = math.floor(risk_budget / per_share_risk)
-            symbol_qty = math.floor(
-                equity * float(effective["max_symbol_exposure_pct"]) / price)
-            share_cap = int(effective["max_shares_per_order"]) or symbol_qty
-            intended_qty = max(1, min(risk_qty, symbol_qty, share_cap))
-            qty = min(risk_qty, math.floor(available / price), share_cap)
+            risk_qty = risk_budget / per_share_risk
+            symbol_qty = equity * float(effective["max_symbol_exposure_pct"]) / price
+            fractional = bool(effective["fractional_shares"])
             risk_room = (equity * float(effective["max_portfolio_open_risk_pct"])
                          - open_risk())
-            qty = min(qty, math.floor(max(risk_room, 0.0) / per_share_risk))
-            if not _meaningful_quantity(qty, intended_qty):
+            if fractional:
+                share_cap = symbol_qty
+                intended_qty = max(1e-4, min(risk_qty, symbol_qty))
+                qty = min(risk_qty, available / price, share_cap,
+                          max(risk_room, 0.0) / per_share_risk)
+                qty = round(qty, 4)
+            else:
+                share_cap = int(effective["max_shares_per_order"]) or math.floor(
+                    symbol_qty)
+                risk_qty = math.floor(risk_qty)
+                allowed = min(math.floor(available / price), share_cap)
+                intended_qty = max(1, min(risk_qty, math.floor(symbol_qty),
+                                          share_cap))
+                qty = min(risk_qty, allowed,
+                          math.floor(max(risk_room, 0.0) / per_share_risk))
+            if not _meaningful_quantity(qty, intended_qty, fractional):
                 continue
             notional = qty * price
             cost = notional * cost_rate

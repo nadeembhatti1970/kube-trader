@@ -166,6 +166,122 @@ class LimitFallbackTests(unittest.TestCase):
         self.assertEqual(result.id, "limit-1")
 
 
+class ProtectionModelTests(unittest.TestCase):
+    def test_unmanaged_position_is_labelled(self):
+        model = execution.protection_model(
+            None, False, [{"time_in_force": "gtc"}], [])
+        self.assertEqual(model["model"], "unmanaged")
+        self.assertTrue(model["stop_present"])
+        self.assertEqual(model["target_management"], "none")
+
+    def test_fractional_intraday_reports_software_target(self):
+        model = execution.protection_model(
+            "intraday", True, [{"time_in_force": "day"}], [])
+        self.assertEqual(model["model"],
+                         "fractional_day_stop_plus_software_target")
+        self.assertEqual(model["target_management"], "software_reconciliation")
+        self.assertEqual(model["stop_time_in_force"], "day")
+
+    def test_fractional_intraday_without_a_stop_is_flagged(self):
+        model = execution.protection_model("intraday", True, [], [])
+        self.assertEqual(model["model"], "fractional_missing_stop")
+        self.assertFalse(model["stop_present"])
+
+    def test_whole_share_intraday_uses_the_broker_bracket(self):
+        model = execution.protection_model(
+            "intraday", False, [{"time_in_force": "day"}],
+            [{"order_type": "limit"}])
+        self.assertEqual(model["model"], "whole_share_day_bracket")
+        self.assertEqual(model["target_management"], "broker_oco")
+
+    def test_swing_core_reports_the_gtc_oto_stop(self):
+        model = execution.protection_model(
+            "core", False, [{"time_in_force": "gtc"}], [])
+        self.assertEqual(model["model"], "gtc_oto_stop")
+        self.assertEqual(model["target_management"], "trend_exit")
+
+    def test_missing_multi_day_stop_is_flagged(self):
+        model = execution.protection_model("swing", False, [], [])
+        self.assertEqual(model["model"], "missing_stop")
+
+
+class FractionalExecutionTests(unittest.TestCase):
+    def test_cap_entry_quantity_returns_a_fraction(self):
+        self.assertEqual(
+            execution.cap_entry_quantity(
+                100, 100.0, 0.02, 100_000.0, 1_990.0, 0.02, fractional=True),
+            5.0,
+        )
+
+    def test_fractional_intraday_entry_is_a_simple_day_order(self):
+        with patch.object(execution.settings, "entry_order_type", "market"):
+            request, is_limit = execution.build_entry_request(
+                "AAPL", 2.5, 100.0, 98.0, 104.0, "kt-1", "intraday",
+                fractional=True)
+
+        self.assertFalse(is_limit)
+        self.assertEqual(request.type.value, "market")
+        self.assertEqual(request.time_in_force.value, "day")
+        self.assertIsNone(request.order_class)
+        self.assertEqual(request.qty, 2.5)
+
+    def test_whole_share_intraday_entry_keeps_the_bracket(self):
+        with patch.object(execution.settings, "entry_order_type", "market"):
+            request, _ = execution.build_entry_request(
+                "AAPL", 10, 100.0, 98.0, 104.0, "kt-1", "intraday")
+
+        self.assertEqual(request.order_class.value, "bracket")
+
+    def test_fractional_stop_is_submitted_after_a_fill(self):
+        class StopClient:
+            def __init__(self):
+                self.requests = []
+
+            def get_order_by_id(self, order_id):
+                return SimpleNamespace(
+                    id=order_id, status="filled", filled_qty="2.5")
+
+            def submit_order(self, request):
+                self.requests.append(request)
+                return SimpleNamespace(id="stop-1", status="new")
+
+        client = StopClient()
+        with patch("app.services.execution.time.monotonic", side_effect=[0, 0]):
+            execution.ensure_fractional_stop(
+                client, SimpleNamespace(id="entry-1"), "AAPL", 98.0)
+
+        self.assertEqual(len(client.requests), 1)
+        stop = client.requests[0]
+        self.assertEqual(stop.type.value, "stop")
+        self.assertEqual(stop.time_in_force.value, "day")
+        self.assertAlmostEqual(float(stop.qty), 2.5)
+        self.assertAlmostEqual(float(stop.stop_price), 98.0)
+
+    def test_software_take_profit_closes_only_at_or_above_target(self):
+        position = SimpleNamespace(symbol="AAPL", current_price="105.0")
+        with patch.object(execution, "managed_pool_assignments",
+                          return_value={"AAPL": "intraday"}), \
+                patch.object(execution, "managed_order_take_profit_price",
+                             return_value=104.0), \
+                patch.object(execution, "close_managed_position",
+                             return_value=True) as close:
+            closed = execution.check_software_take_profits(object(), [position])
+
+        self.assertEqual(closed, ["AAPL"])
+        close.assert_called_once()
+
+        position.current_price = "103.0"
+        with patch.object(execution, "managed_pool_assignments",
+                          return_value={"AAPL": "intraday"}), \
+                patch.object(execution, "managed_order_take_profit_price",
+                             return_value=104.0), \
+                patch.object(execution, "close_managed_position") as close:
+            closed = execution.check_software_take_profits(object(), [position])
+
+        self.assertEqual(closed, [])
+        close.assert_not_called()
+
+
 class ProcessBatchTests(unittest.TestCase):
     def test_acknowledges_dropped_events_and_handles_the_rest(self):
         class FakeRedis:

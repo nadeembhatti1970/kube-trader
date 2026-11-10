@@ -34,6 +34,7 @@ DEFAULT_CONFIG = {
     "max_sector_exposure_pct": 0.25,
     "max_open_positions": 20,
     "max_shares_per_order": 100,
+    "fractional_shares": True,
     "intraday_entry_start_minutes": 5,
     "intraday_entry_cutoff_minutes": 30,
     "intraday_flatten_minutes": 10,
@@ -462,15 +463,26 @@ def simulate_portfolio(bars_by_symbol: dict[str, list[dict]], config: dict | Non
             )
             if available <= 0:
                 continue
-            qty = min(
-                math.floor(risk_budget / per_share_risk),
-                math.floor(available / price),
-                int(effective["max_shares_per_order"]) or math.floor(available / price),
-            )
             risk_room = (equity * float(effective["max_portfolio_open_risk_pct"])
                          - open_risk())
-            qty = min(qty, math.floor(max(risk_room, 0.0) / per_share_risk))
-            if qty < 1:
+            if bool(effective["fractional_shares"]):
+                # Fractional sizing keeps every cap proportional to equity, so the
+                # trade set and percentage returns do not depend on the capital base.
+                qty = min(
+                    risk_budget / per_share_risk,
+                    available / price,
+                    max(risk_room, 0.0) / per_share_risk,
+                )
+                qty = round(qty, 4)
+            else:
+                qty = min(
+                    math.floor(risk_budget / per_share_risk),
+                    math.floor(available / price),
+                    int(effective["max_shares_per_order"])
+                    or math.floor(available / price),
+                )
+                qty = min(qty, math.floor(max(risk_room, 0.0) / per_share_risk))
+            if qty <= 0:
                 continue
             notional = qty * price
             cost = notional * cost_rate

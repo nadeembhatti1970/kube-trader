@@ -67,6 +67,9 @@ class Settings(BaseSettings):
     entry_order_type: str = "market"
     entry_limit_offset_bps: float = 10.0
     limit_order_timeout_seconds: float = 15.0
+    fractional_shares_enabled: bool = True
+    fractional_qty_decimals: int = 4
+    fractional_fill_timeout_seconds: float = 10.0
     min_entry_bar_coverage_pct: float = 0.0
     require_validated_strategy: bool = False
     validation_min_trades: int = 30
@@ -115,6 +118,8 @@ def strategy_config(settings: Settings | None = None, event: dict | None = None)
         "intraday_daily_loss_limit_pct": current.intraday_daily_loss_limit_pct,
         "entry_order_type": current.entry_order_type,
         "entry_limit_offset_bps": current.entry_limit_offset_bps,
+        "fractional_shares_enabled": current.fractional_shares_enabled,
+        "fractional_qty_decimals": current.fractional_qty_decimals,
         "risk_controls": {
             "configured_max_trade_risk_pct": current.max_trade_risk_pct,
             "effective_max_trade_risk_pct": min(current.max_trade_risk_pct, 0.01),

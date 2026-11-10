@@ -2,6 +2,7 @@ import hashlib
 import json
 import logging
 import math
+from collections import defaultdict
 import threading
 import time
 import uuid
@@ -23,7 +24,8 @@ from app.alpaca_reporting import (fetch_account_activities, serialize_account,
 from app.database import (bot_origin_symbols, broker_activity_sync_status,
                           entry_count_since, fill_order_ids_missing_type,
                           get_risk_state, init_db, latest_strategy_validation,
-                          managed_fills, managed_order_id, managed_order_stop_loss_pct,
+                          managed_fills, managed_order_id,
+                          managed_order_stop_loss_pct, managed_order_take_profit_price,
                           managed_order_roots, managed_orders, managed_pool_assignments,
                           managed_symbols, orders_missing_fill_data, reserve_order,
                           save_account_snapshot, save_broker_order_type,
@@ -71,14 +73,49 @@ def minutes_since_open(now: datetime | None = None) -> float | None:
     return (local - open_at).total_seconds() / 60
 
 
-def cap_entry_quantity(qty: int, price: float, stop_loss_pct: float, equity: float,
-                       open_risk: float, max_open_risk_pct: float) -> int:
+def cap_entry_quantity(qty, price: float, stop_loss_pct: float, equity: float,
+                       open_risk: float, max_open_risk_pct: float,
+                       fractional: bool = False):
     """Keep the sum of stop-risk across open positions inside the portfolio cap."""
     if max_open_risk_pct <= 0 or equity <= 0:
         return qty
     per_share_risk = max(price * stop_loss_pct, 0.01)
     room = max(equity * max_open_risk_pct - max(open_risk, 0.0), 0.0)
-    return max(0, min(qty, math.floor(room / per_share_risk)))
+    limit = room / per_share_risk
+    qty = min(qty, limit) if fractional else min(qty, math.floor(limit))
+    return round(qty, 4) if fractional else qty
+
+
+def protection_model(pool: str | None, fractional: bool, stops: list[dict],
+                     targets: list[dict]) -> dict:
+    """Describe how an open position's exits are enforced at the broker or in code."""
+    stop_present = bool(stops)
+    stop_tif = stops[0].get("time_in_force") if stops else None
+    if pool is None:
+        return {"model": "unmanaged", "stop_present": stop_present,
+                "stop_time_in_force": stop_tif, "target_management": "none"}
+    if pool == "intraday" and fractional:
+        return {
+            "model": ("fractional_day_stop_plus_software_target"
+                      if stop_present else "fractional_missing_stop"),
+            "stop_present": stop_present,
+            "stop_time_in_force": stop_tif,
+            "target_management": "software_reconciliation",
+        }
+    if pool == "intraday":
+        return {
+            "model": ("whole_share_day_bracket" if stop_present
+                      else "whole_share_missing_stop"),
+            "stop_present": stop_present,
+            "stop_time_in_force": stop_tif,
+            "target_management": "broker_oco" if targets else "signal_or_flatten",
+        }
+    return {
+        "model": "gtc_oto_stop" if stop_present else "missing_stop",
+        "stop_present": stop_present,
+        "stop_time_in_force": stop_tif,
+        "target_management": "trend_exit",
+    }
 
 
 def order_tree(order):
@@ -466,6 +503,8 @@ def reconcile(client_api: TradingClient):
         status=QueryOrderStatus.OPEN, limit=500, nested=True,
     ))
     protected = set()
+    protective_orders = defaultdict(list)
+    target_orders = defaultdict(list)
     for order in open_orders:
         for item in order_tree(order):
             symbol = getattr(item, "symbol", None)
@@ -473,8 +512,19 @@ def reconcile(client_api: TradingClient):
             raw_side = getattr(item, "side", "")
             order_type = str(getattr(raw_type, "value", raw_type)).lower()
             side = str(getattr(raw_side, "value", raw_side)).lower()
+            raw_tif = getattr(item, "time_in_force", "")
+            tif = str(getattr(raw_tif, "value", raw_tif)).lower() or None
             if symbol and "stop" in order_type:
                 protected.add((symbol, side))
+                protective_orders[symbol].append({
+                    "order_type": order_type,
+                    "time_in_force": tif,
+                })
+            elif symbol and "limit" in order_type:
+                target_orders[symbol].append({
+                    "order_type": order_type,
+                    "time_in_force": tif,
+                })
 
     broker_positions = []
     stop_gaps = []
@@ -498,6 +548,13 @@ def reconcile(client_api: TradingClient):
             "market_value": float(position.market_value),
             "avg_entry_price": avg_entry,
         })
+        assigned_pool = pool_by_symbol.get(symbol)
+        fractional_position = abs(qty - math.floor(qty)) > 1e-9
+        position_report["pool"] = assigned_pool or "unmanaged"
+        position_report["quantity_fractional"] = fractional_position
+        position_report["protection"] = protection_model(
+            assigned_pool, fractional_position,
+            protective_orders.get(symbol, []), target_orders.get(symbol, []))
         broker_positions.append(position_report)
         pool = pool_by_symbol.get(symbol, "core")
         exposures[pool] += abs(float(position.market_value))
@@ -514,11 +571,17 @@ def reconcile(client_api: TradingClient):
             if stop_pct is None:
                 stop_pct = default_stop_loss_pct(pool)
             stop_price = avg_entry * (1 - stop_pct if qty > 0 else 1 + stop_pct)
+            position_qty = abs(qty)
+            fractional_position = abs(position_qty - math.floor(position_qty)) > 1e-9
+            stop_qty = (round(position_qty, settings.fractional_qty_decimals)
+                        if fractional_position else position_qty)
+            stop_tif = (TimeInForce.DAY if fractional_position
+                        else TimeInForce.GTC)
             client_order_id = "kt-protect-" + uuid.uuid4().hex[:24]
             try:
                 client_api.submit_order(StopOrderRequest(
-                    symbol=symbol, qty=abs(qty), side=close_side, type=OrderType.STOP,
-                    time_in_force=TimeInForce.GTC, stop_price=max(round(stop_price, 2), 0.01),
+                    symbol=symbol, qty=stop_qty, side=close_side, type=OrderType.STOP,
+                    time_in_force=stop_tif, stop_price=max(round(stop_price, 2), 0.01),
                     client_order_id=client_order_id,
                 ))
                 protected.add((symbol, close_side.value))
@@ -576,6 +639,15 @@ def reconcile(client_api: TradingClient):
             "Bot-created positions have no pool provenance and are not managed; review and "
             "adopt explicitly with POST /admin/positions/{symbol}/adopt: "
             + ", ".join(unmanaged_bot_origin))
+    protected_models = defaultdict(int)
+    for item in broker_positions:
+        protected_models[item["protection"]["model"]] += 1
+    unprotected = sorted(
+        item["symbol"] for item in broker_positions
+        if item["protection"]["model"].endswith("missing_stop"))
+    if unprotected:
+        warnings.append(
+            "Managed positions without a protective stop: " + ", ".join(unprotected))
     open_risk_pct = open_risk / equity if equity else 0.0
     if (settings.max_portfolio_open_risk_pct > 0
             and open_risk_pct > settings.max_portfolio_open_risk_pct):
@@ -592,6 +664,7 @@ def reconcile(client_api: TradingClient):
              "open_risk": open_risk,
              "open_risk_pct": open_risk_pct,
              "max_portfolio_open_risk_pct": settings.max_portfolio_open_risk_pct,
+             "protection_summary": dict(sorted(protected_models.items())),
              "warnings": warnings,
              "allocations": allocations, "sector_exposures": sector_exposures}
     for warning in warnings:
@@ -659,10 +732,30 @@ def cached_risk_view(client_api: TradingClient, max_age_seconds: float | None = 
         return value
 
 
-def build_entry_request(symbol: str, qty: int, price: float, stop_price: float,
+def build_entry_request(symbol: str, qty, price: float, stop_price: float,
                         take_profit_price: float | None, client_order_id: str,
-                        pool: str, force_market: bool = False):
-    """Build the entry order and report whether it is a marketable limit."""
+                        pool: str, force_market: bool = False,
+                        fractional: bool = False):
+    """Build the entry order and report whether it is a marketable limit.
+
+    Alpaca allows fractional quantities only on simple orders with a day time in
+    force, so fractional intraday entries carry no bracket legs. The stop is
+    submitted separately once the entry fills and the target is enforced in
+    software.
+    """
+    if pool == "intraday" and fractional:
+        if settings.entry_order_type == "marketable_limit" and not force_market:
+            limit_price = max(
+                round(price * (1 + settings.entry_limit_offset_bps / 10_000.0), 2), 0.01)
+            return LimitOrderRequest(
+                symbol=symbol, qty=qty, side=OrderSide.BUY, type=OrderType.LIMIT,
+                limit_price=limit_price, time_in_force=TimeInForce.DAY,
+                client_order_id=(client_order_id + "-l")[:48],
+            ), True
+        return MarketOrderRequest(
+            symbol=symbol, qty=qty, side=OrderSide.BUY, type=OrderType.MARKET,
+            time_in_force=TimeInForce.DAY, client_order_id=client_order_id,
+        ), False
     if pool == "intraday":
         if settings.entry_order_type == "marketable_limit" and not force_market:
             limit_price = max(
@@ -698,9 +791,9 @@ def order_status(order) -> str:
                        getattr(order, "status", ""))).lower()
 
 
-def await_fill_or_fallback(client_api: TradingClient, order, symbol: str, qty: int,
+def await_fill_or_fallback(client_api: TradingClient, order, symbol: str, qty,
                            stop_price: float, take_profit_price: float | None,
-                           pool: str, client_order_id: str):
+                           pool: str, client_order_id: str, fractional: bool = False):
     """Give a marketable limit a short window, then take liquidity for the remainder."""
     deadline = time.monotonic() + max(settings.limit_order_timeout_seconds, 0.0)
     while time.monotonic() < deadline:
@@ -729,14 +822,92 @@ def await_fill_or_fallback(client_api: TradingClient, order, symbol: str, qty: i
             "instead of submitting a second entry", order.id, symbol)
         return current
     remaining = qty - float(getattr(current, "filled_qty", None) or 0.0)
-    if remaining < 1:
+    fallback_qty = (round(remaining, settings.fractional_qty_decimals)
+                    if fractional else int(remaining))
+    if fallback_qty <= 0:
         return current
     fallback, _ = build_entry_request(
-        symbol, int(remaining), 0.0, stop_price, take_profit_price,
-        (client_order_id + "-f")[:48], pool, force_market=True)
+        symbol, fallback_qty, 0.0, stop_price, take_profit_price,
+        (client_order_id + "-f")[:48], pool, force_market=True,
+        fractional=fractional)
     log.warning("Limit entry for %s did not fill; submitting a market order for %s shares",
-                symbol, int(remaining))
+                symbol, fallback_qty)
     return client_api.submit_order(fallback)
+
+
+def ensure_fractional_stop(client_api: TradingClient, order, symbol: str,
+                           stop_price: float) -> None:
+    """Submit the broker-side stop for a fractional intraday entry.
+
+    Fractional quantities cannot be attached to a bracket, so the stop is a
+    separate day order submitted as soon as the entry reports a fill. A missed
+    window is repaired by reconciliation.
+    """
+    deadline = time.monotonic() + max(settings.fractional_fill_timeout_seconds, 0.0)
+    current = order
+    while time.monotonic() < deadline:
+        try:
+            current = client_api.get_order_by_id(order.id)
+        except Exception:
+            log.exception("Unable to poll fractional entry %s for %s", order.id, symbol)
+            break
+        status = order_status(current)
+        if status in {"filled", "partially_filled"}:
+            break
+        if status in {"canceled", "expired", "rejected"}:
+            return
+        time.sleep(0.5)
+    filled = float(getattr(current, "filled_qty", None) or 0.0)
+    if filled <= 0:
+        log.warning(
+            "Fractional entry %s for %s has no fill yet; reconciliation will "
+            "submit the protective stop", order.id, symbol)
+        return
+    stop_qty = round(filled, settings.fractional_qty_decimals)
+    try:
+        client_api.submit_order(StopOrderRequest(
+            symbol=symbol, qty=stop_qty, side=OrderSide.SELL, type=OrderType.STOP,
+            time_in_force=TimeInForce.DAY, stop_price=stop_price,
+            client_order_id="kt-protect-" + uuid.uuid4().hex[:24],
+        ))
+        log.warning("Submitted fractional day stop for %s qty=%s at %s",
+                    symbol, stop_qty, stop_price)
+    except Exception:
+        log.exception(
+            "Unable to submit the fractional stop for %s; reconciliation will retry",
+            symbol)
+
+
+def check_software_take_profits(client_api: TradingClient, positions) -> list[str]:
+    """Close fractional intraday positions that reached their recorded target.
+
+    Fractional orders cannot carry a take-profit bracket leg, so the target is
+    checked against the broker's current price on each reconciliation cycle.
+    """
+    if not settings.fractional_shares_enabled:
+        return []
+    pools = managed_pool_assignments()
+    now = datetime.now(timezone.utc)
+    closed = []
+    for position in positions:
+        symbol = position.symbol
+        if pools.get(symbol) != "intraday":
+            continue
+        target = managed_order_take_profit_price(symbol, "intraday")
+        current = float(getattr(position, "current_price", None) or 0.0)
+        if target is None or current <= 0 or current < target:
+            continue
+        try:
+            if close_managed_position(
+                    client_api, symbol, "intraday", positions, "tp-software",
+                    {"ts": now.isoformat(), "price": current},
+                    cancel_protective_stop=True):
+                closed.append(symbol)
+                log.warning("Software take-profit closed %s at %.4f (target %.4f)",
+                            symbol, current, target)
+        except Exception:
+            log.exception("Software take-profit failed for %s", symbol)
+    return closed
 
 
 def place_entry(client_api: TradingClient, event: dict, signal_id: str,
@@ -855,14 +1026,32 @@ def place_entry(client_api: TradingClient, event: dict, signal_id: str,
     ))
     stop_loss_pct = min(max(float(event.get("stop_loss_pct", settings.stop_loss_pct)), 0.005), 0.25)
     risk_budget = equity * min(settings.max_trade_risk_pct, 0.01)
-    qty = min(math.floor(risk_budget / (price * stop_loss_pct)),
-              math.floor(available / price), 100)
+    fractional = bool(settings.fractional_shares_enabled)
+    if fractional and pool == "intraday":
+        try:
+            asset = client_api.get_asset(symbol)
+            if not getattr(asset, "fractionable", False):
+                fractional = False
+                log.info("Asset %s is not fractionable; using whole shares", symbol)
+        except Exception:
+            log.exception("Unable to check whether %s is fractionable", symbol)
+    if fractional:
+        qty = min(risk_budget / (price * stop_loss_pct), available / price, 100.0)
+        qty = round(qty, settings.fractional_qty_decimals)
+    else:
+        qty = min(math.floor(risk_budget / (price * stop_loss_pct)),
+                  math.floor(available / price), 100)
     qty = cap_entry_quantity(
         qty, price, stop_loss_pct, equity,
-        float(risk.get("open_risk") or 0.0), settings.max_portfolio_open_risk_pct,
+        float(risk.get("open_risk") or 0.0),
+        settings.max_portfolio_open_risk_pct, fractional,
     )
-    if qty < 1:
-        log.info("Risk/allocation limits leave no whole shares for %s", symbol)
+    if fractional and pool != "intraday":
+        # Alpaca does not support fractional quantities on GTC or OTO orders.
+        qty = max(1, math.floor(qty))
+    minimum = 1e-4 if fractional and pool == "intraday" else 1
+    if qty < minimum:
+        log.info("Risk/allocation limits leave no tradable quantity for %s", symbol)
         return False
 
     client_order_id = "kt-" + hashlib.sha256(f"{symbol}:{pool}:{signal_id}".encode()).hexdigest()[:28]
@@ -928,13 +1117,17 @@ def place_entry(client_api: TradingClient, event: dict, signal_id: str,
             )
         return False
     try:
+        fractional_intraday = fractional and pool == "intraday"
         request, is_limit = build_entry_request(
-            symbol, qty, price, stop_price, take_profit_price, client_order_id, pool)
+            symbol, qty, price, stop_price, take_profit_price, client_order_id, pool,
+            fractional=fractional_intraday)
         order = client_api.submit_order(request)
         if is_limit:
             order = await_fill_or_fallback(
                 client_api, order, symbol, qty, stop_price, take_profit_price,
-                pool, client_order_id)
+                pool, client_order_id, fractional=fractional_intraday)
+        if fractional_intraday:
+            ensure_fractional_stop(client_api, order, symbol, stop_price)
     except Exception:
         update_order(client_order_id, None, "submission_unknown")
         log.exception(
@@ -1102,6 +1295,7 @@ def main():
             try:
                 _, positions, risk, open_orders = cached_risk_view(
                     client_api, max_age_seconds=0.0)
+                check_software_take_profits(client_api, positions)
                 flatten_intraday_positions(client_api, positions)
                 refresh_tracked_order_statuses(client_api, open_orders)
             except Exception:

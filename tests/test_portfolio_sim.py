@@ -221,6 +221,27 @@ class PortfolioSimulationTests(unittest.TestCase):
         self.assertEqual(len(result["trades"]), 1)
         self.assertTrue(result["trades"][0]["entry_ts"].startswith("2026-11-09"))
 
+    def test_fractional_sizing_is_scale_invariant(self):
+        bars = bars_from(breakout_path())
+        small = simulate_portfolio(
+            {"AAPL": bars}, {**BASE, "starting_equity": 50_000.0})
+        large = simulate_portfolio(
+            {"AAPL": bars}, {**BASE, "starting_equity": 100_000.0})
+
+        self.assertEqual(
+            [round(trade["net_return_pct"], 9) for trade in small["trades"]],
+            [round(trade["net_return_pct"], 9) for trade in large["trades"]],
+        )
+
+    def test_whole_share_mode_still_rounds_quantities(self):
+        result = simulate_portfolio(
+            {"AAPL": bars_from(breakout_path())},
+            {**BASE, "fractional_shares": False},
+        )
+        self.assertGreater(len(result["trades"]), 0)
+        self.assertTrue(all(float(trade["quantity"]).is_integer()
+                            for trade in result["trades"]))
+
     def test_starting_equity_is_required(self):
         with self.assertRaises(ValueError):
             simulate_portfolio({"AAPL": bars_from(breakout_path())},
