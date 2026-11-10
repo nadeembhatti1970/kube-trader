@@ -1,7 +1,7 @@
 import unittest
 from datetime import date, timedelta
 
-from app.portfolio_daily_sim import simulate_daily_portfolio
+from app.portfolio_daily_sim import _regime_allows, simulate_daily_portfolio
 
 
 def daily(closes, start=date(2026, 1, 5)):
@@ -75,6 +75,47 @@ class DailySimulationTests(unittest.TestCase):
         result = simulate_daily_portfolio({}, BASE)
         self.assertEqual(result["status"], "no_data")
         self.assertIn("significance", result)
+
+    def test_regime_filter_blocks_entries_when_risk_off(self):
+        closes = ([100.0] * 30 + [100.0 + index for index in range(21)]
+                  + [120.0 - 0.5 * index for index in range(1, 25)])
+        regime = daily([200.0 - index for index in range(60)])
+        result = simulate_daily_portfolio(
+            {"AAPL": daily(closes)},
+            {**BASE, "regime_filter_enabled": True, "regime_sma": 20},
+            regime_bars=regime,
+        )
+
+        self.assertEqual(result["trades"], [])
+        self.assertTrue(result["regime"]["enabled"])
+
+    def test_regime_filter_allows_entries_when_risk_on(self):
+        closes = ([100.0] * 30 + [100.0 + index for index in range(21)]
+                  + [120.0 - 0.5 * index for index in range(1, 25)])
+        regime = daily([100.0 + index for index in range(60)])
+        result = simulate_daily_portfolio(
+            {"AAPL": daily(closes)},
+            {**BASE, "regime_filter_enabled": True, "regime_sma": 20},
+            regime_bars=regime,
+        )
+
+        self.assertGreater(len(result["trades"]), 0)
+
+    def test_regime_filter_requires_regime_bars(self):
+        with self.assertRaises(ValueError):
+            simulate_daily_portfolio(
+                {"AAPL": daily([100.0] * 30)},
+                {**BASE, "regime_filter_enabled": True, "regime_sma": 20},
+            )
+
+    def test_regime_uses_the_prior_session_only(self):
+        days = [date(2026, 1, 5), date(2026, 1, 6)]
+        values = [True, False]
+
+        self.assertTrue(_regime_allows(days, values, date(2026, 1, 5)))
+        self.assertTrue(_regime_allows(days, values, date(2026, 1, 6)))
+        self.assertFalse(_regime_allows(days, values, date(2026, 1, 7)))
+        self.assertTrue(_regime_allows([date(2026, 1, 5)], [None], date(2026, 1, 6)))
 
     def test_invalid_split_fraction_is_rejected(self):
         with self.assertRaises(ValueError):

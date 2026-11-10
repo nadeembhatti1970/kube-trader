@@ -6,6 +6,7 @@ are evaluated on completed daily closes and fill at the next day's open; stops
 are checked against each day's open and low. Nothing here places orders.
 """
 import math
+from bisect import bisect_left
 from collections import defaultdict
 from datetime import date, datetime
 from statistics import mean, pstdev
@@ -32,8 +33,57 @@ DEFAULT_CONFIG = {
     "max_shares_per_order": 100,
     "cost_bps_per_side": 5.0,
     "split_fraction": 0.7,
+    # Risk-off regime filter: block new entries while the regime symbol closed
+    # below its moving average on the prior session.
+    "regime_filter_enabled": False,
+    "regime_sma": 200,
 }
 POOL_WEIGHT_KEYS = {"swing": "swing_allocation_pct", "core": "core_allocation_pct"}
+
+
+def daily_config(settings, starting_equity: float, cost_bps: float | None = None,
+                 split_fraction: float = 0.7, regime_filter_enabled: bool = False,
+                 regime_sma: int = 200) -> dict:
+    """Build the daily simulation config from runtime settings."""
+    return {
+        "starting_equity": float(starting_equity),
+        "swing_allocation_pct": settings.swing_allocation_pct,
+        "core_allocation_pct": settings.core_allocation_pct,
+        "swing_sma": 20,
+        "swing_atr_period": settings.swing_atr_period,
+        "swing_atr_multiple": settings.swing_atr_multiple,
+        "core_fast": 50,
+        "core_slow": 200,
+        "core_stop_loss_pct": settings.core_stop_loss_pct,
+        "max_trade_risk_pct": min(settings.max_trade_risk_pct, 0.01),
+        "max_portfolio_open_risk_pct": 0.05,
+        "max_symbol_exposure_pct": settings.max_symbol_exposure_pct,
+        "max_sector_exposure_pct": settings.max_sector_exposure_pct,
+        "max_open_positions": settings.max_open_positions,
+        "cost_bps_per_side": (settings.backtest_cost_bps
+                              if cost_bps is None else cost_bps),
+        "split_fraction": split_fraction,
+        "regime_filter_enabled": regime_filter_enabled,
+        "regime_sma": regime_sma,
+    }
+
+
+def daily_validation_params(config: dict) -> dict:
+    """Parameters that identify a daily verdict; shared by the API and the grid."""
+    return {
+        "swing_allocation_pct": config["swing_allocation_pct"],
+        "core_allocation_pct": config["core_allocation_pct"],
+        "swing_sma": config["swing_sma"],
+        "swing_atr_period": config["swing_atr_period"],
+        "swing_atr_multiple": config["swing_atr_multiple"],
+        "core_fast": config["core_fast"],
+        "core_slow": config["core_slow"],
+        "core_stop_loss_pct": config["core_stop_loss_pct"],
+        "cost_bps_per_side": config["cost_bps_per_side"],
+        "split_fraction": config["split_fraction"],
+        "regime_filter_enabled": config["regime_filter_enabled"],
+        "regime_sma": config["regime_sma"],
+    }
 
 
 def _as_date(value) -> date:
@@ -111,6 +161,25 @@ def _prepare(bars: list[dict], config: dict) -> dict:
     }
 
 
+def _regime_series(bars: list[dict], period: int) -> tuple[list[date], list[bool | None]]:
+    normalized = _normalize(bars)
+    closes = [bar["close"] for bar in normalized]
+    average = _sma(closes, period)
+    days = [bar["day"] for bar in normalized]
+    values = [None if average[index] is None else closes[index] > average[index]
+              for index in range(len(normalized))]
+    return days, values
+
+
+def _regime_allows(days: list[date], values: list[bool | None], day: date) -> bool:
+    """Use the latest regime observation strictly before the session being traded."""
+    index = bisect_left(days, day) - 1
+    if index < 0:
+        return True  # insufficient regime history; do not block entries
+    value = values[index]
+    return True if value is None else bool(value)
+
+
 def _metrics(equity_points: list[tuple[date, float]], exposures: list[float],
              turnover: float, cost: float) -> dict:
     if not equity_points:
@@ -159,7 +228,8 @@ def _trade_summary(trades: list[dict]) -> dict:
 def simulate_daily_portfolio(bars_by_symbol: dict[str, list[dict]],
                              config: dict | None = None,
                              sectors: dict[str, str] | None = None,
-                             validation: dict | None = None) -> dict:
+                             validation: dict | None = None,
+                             regime_bars: list[dict] | None = None) -> dict:
     """Simulate the swing and core pools together over supplied daily bars."""
     effective = dict(DEFAULT_CONFIG)
     effective.update(config or {})
@@ -168,6 +238,14 @@ def simulate_daily_portfolio(bars_by_symbol: dict[str, list[dict]],
         raise ValueError("split_fraction must be between 0.5 and 0.9")
     if float(effective["cost_bps_per_side"]) < 0:
         raise ValueError("cost_bps_per_side cannot be negative")
+    regime_enabled = bool(effective["regime_filter_enabled"])
+    regime_sma = int(effective["regime_sma"])
+    if regime_enabled:
+        if not regime_bars:
+            raise ValueError("regime_filter_enabled requires regime_bars")
+        regime_days, regime_values = _regime_series(regime_bars, regime_sma)
+    else:
+        regime_days, regime_values = [], []
 
     frames = {}
     for symbol, bars in bars_by_symbol.items():
@@ -252,6 +330,8 @@ def simulate_daily_portfolio(bars_by_symbol: dict[str, list[dict]],
             if not action or action[0] != "buy" or symbol in positions:
                 continue
             pending.pop(symbol, None)
+            if not _regime_allows(regime_days, regime_values, day):
+                continue
             pool = action[1]
             bar = frame["bars"][index]
             price = bar["open"]
@@ -468,6 +548,13 @@ def simulate_daily_portfolio(bars_by_symbol: dict[str, list[dict]],
             "last_day": days[-1].isoformat(),
         },
         "split_fraction": split_fraction,
+        "regime": {
+            "enabled": regime_enabled,
+            "sma": regime_sma if regime_enabled else None,
+            "basis": (
+                "new entries are allowed only while the regime symbol closed above "
+                "its SMA on the prior session" if regime_enabled else None),
+        },
         "in_sample": in_sample,
         "out_of_sample": out_of_sample,
         "equity": {
@@ -500,5 +587,7 @@ def simulate_daily_portfolio(bars_by_symbol: dict[str, list[dict]],
             "The in-sample/out-of-sample split is one chronological cut of a continuous "
             "simulation; out-of-sample equity starts at the boundary value and open "
             "positions carry across.",
+            "The regime filter gates new entries only; open positions are still managed "
+            "by their stops and trend exits.",
         ],
     }

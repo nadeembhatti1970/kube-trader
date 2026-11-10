@@ -132,7 +132,15 @@ python -m app.services.backfill --timeframe day --days 1000
 
 ### Daily portfolio research
 
-`/research/portfolio/daily` runs the swing (close vs 20-day SMA) and core (50/200-day cross) pools together under the live pool budgets, symbol and sector caps, 1% risk sizing, open-risk cap, and per-side costs. Signals fill at the next day's open and stops fill at the stop price, or at the open on a gap through it. The report includes the same in-sample/out-of-sample split, bootstrap interval, minimum detectable edge, and exposure-matched benchmark as the intraday simulator, plus a `daily-swing-core` validation identity. It reads the `daily_bars` table and never places orders.
+`/research/portfolio/daily` runs the swing (close vs 20-day SMA) and core (50/200-day cross) pools together under the live pool budgets, symbol and sector caps, 1% risk sizing, open-risk cap, and per-side costs. Signals fill at the next day's open and stops fill at the stop price, or at the open on a gap through it. The report includes the same in-sample/out-of-sample split, bootstrap interval, minimum detectable edge, and exposure-matched benchmark as the intraday simulator, plus a `daily-swing-core` validation identity. It reads the `daily_bars` table and never places orders. Set `regime_filter=true` to block new swing/core entries while the regime symbol (default `SPY`) closed below its `regime_sma` (default 200) on the prior session; open positions still follow their own stops and trend exits.
+
+### Maintenance
+
+```sh
+python -m app.services.maintenance --purge-stale-validations
+```
+
+Deletes validation verdicts written under older schemes. The schema-versioned hash already prevents them from satisfying the gate; purging simply keeps the table readable.
 
 Trade reports group closed slices by entry app version as well as effective strategy/risk configuration. Orders record configured risk controls and the calculated order sizing; trades without recorded provenance remain `unknown` and are not backfilled from current settings.
 

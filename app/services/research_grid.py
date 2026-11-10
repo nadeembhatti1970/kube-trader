@@ -15,11 +15,13 @@ import argparse
 import logging
 
 from app.database import (init_db, latest_account_snapshot, latest_universe_snapshot,
-                          recent_bars, save_strategy_validation)
+                          recent_bars, recent_daily_bars, save_strategy_validation)
+from app.portfolio_daily_sim import (daily_config, daily_validation_params,
+                                     simulate_daily_portfolio)
 from app.portfolio_sim import simulate_portfolio
 from app.settings import get_settings, strategy_config
 from app.universe import sector_for_symbol
-from app.validation import validation_config_key, validation_verdict
+from app.validation import config_key, validation_config_key, validation_verdict
 
 logging.basicConfig(level=logging.INFO)
 log = logging.getLogger("research-grid")
@@ -155,6 +157,87 @@ def run_grid(bars_by_symbol: dict[str, list[dict]], sectors: dict[str, str],
     return rows
 
 
+def build_daily_variants(regime_smas: list[int]) -> list[dict]:
+    variants = [{"regime_filter_enabled": False, "regime_sma": 200,
+                 "label": "no-regime"}]
+    for sma in regime_smas:
+        variants.append({"regime_filter_enabled": True, "regime_sma": sma,
+                         "label": f"regime{sma}"})
+    return variants
+
+
+def _row_from_result(result: dict, label: str, variant: dict, cost: float,
+                     min_oos_trades: int) -> dict:
+    out_of_sample = result.get("out_of_sample") or {}
+    significance = out_of_sample.get("significance") or {}
+    metrics = out_of_sample.get("metrics") or {}
+    benchmark_relative = out_of_sample.get("benchmark_relative") or {}
+    in_sample = result.get("in_sample") or {}
+    mean_return = significance.get("mean")
+    return {
+        "variant": variant,
+        "label": label,
+        "is_trades": (in_sample.get("significance") or {}).get("n", 0),
+        "oos_trades": significance.get("n", 0),
+        "oos_gross_pct": (mean_return + cost if mean_return is not None else None),
+        "oos_net_pct": mean_return,
+        "oos_ci_low": significance.get("ci_low"),
+        "oos_ci_high": significance.get("ci_high"),
+        "oos_pf": metrics.get("profit_factor"),
+        "oos_return_pct": metrics.get("total_return_pct"),
+        "oos_exposure_pct": metrics.get("average_exposure_pct"),
+        "oos_excess_pct": benchmark_relative.get("mean_excess_pct"),
+        "oos_excess_ci_low": benchmark_relative.get("ci_low_pct"),
+        "validated": validation_verdict(
+            significance, min_oos_trades, benchmark_relative),
+        "result": result,
+        "benchmark_relative": benchmark_relative,
+    }
+
+
+def run_daily_grid(bars_by_symbol: dict[str, list[dict]],
+                   regime_bars: list[dict], sectors: dict[str, str],
+                   base_config: dict, variants: list[dict], *,
+                   persist: bool = False, min_oos_trades: int = 30,
+                   confidence: float = 0.95) -> list[dict]:
+    cost = 2.0 * float(base_config["cost_bps_per_side"]) / 100.0
+    rows = []
+    for variant in variants:
+        config = {**base_config, **variant}
+        result = simulate_daily_portfolio(
+            bars_by_symbol, config, sectors=sectors,
+            validation={"confidence": confidence}, regime_bars=regime_bars)
+        row = _row_from_result(
+            result, str(variant.get("label", "daily")), variant,
+            cost, min_oos_trades)
+        if persist:
+            identity = config_key(
+                "daily-swing-core", daily_validation_params(config))
+            significance = (result.get("out_of_sample") or {}).get(
+                "significance") or {}
+            save_strategy_validation(
+                identity["key"], "daily-swing-core-v1", identity["config"],
+                int(significance.get("n") or 0), significance.get("mean"),
+                significance.get("ci_low"), significance.get("ci_high"),
+                row["validated"],
+                {
+                    "basis": "out_of_sample",
+                    "config": config,
+                    "benchmark_relative_out_of_sample": row["benchmark_relative"],
+                    "in_sample": result.get("in_sample"),
+                    "out_of_sample": result.get("out_of_sample"),
+                    "metrics": result.get("metrics"),
+                    "period": result.get("period"),
+                },
+                scheme_version=identity["scheme_version"],
+            )
+            row["config_hash"] = identity["key"]
+        rows.append(row)
+    rows.sort(key=lambda item: (
+        item["oos_gross_pct"] is None, -(item["oos_gross_pct"] or 0.0)))
+    return rows
+
+
 def print_table(rows: list[dict]) -> None:
     header = (f"{'variant':40s} {'ISn':>4s} {'OOSn':>5s} {'OOS gross':>10s} "
               f"{'OOS net':>9s} {'OOS 95% CI':>19s} {'excess':>9s} {'exCIlo':>8s} "
@@ -192,8 +275,9 @@ def resolve_symbols(explicit: str | None, limit: int) -> list[str]:
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--days", type=int, default=12000,
-                        help="Stored minute bars per symbol (default 12000)")
+    parser.add_argument("--mode", choices=["intraday", "daily"], default="intraday")
+    parser.add_argument("--days", type=int, default=None,
+                        help="Stored bars per symbol (default 12000 intraday, 700 daily)")
     parser.add_argument("--symbols", default=None,
                         help="Comma-separated symbols; defaults to the selected universe")
     parser.add_argument("--max-symbols", type=int,
@@ -207,6 +291,10 @@ def main():
     parser.add_argument("--premises", default="sma_crossover",
                         help="Comma-separated sma_crossover, opening_range_breakout, "
                              "gap_up; spread and RSI apply only to the SMA premise")
+    parser.add_argument("--regime-smas", default="50,100,200",
+                        help="Daily mode: moving-average periods for the regime filter")
+    parser.add_argument("--regime-symbol", default="SPY",
+                        help="Daily mode: symbol that defines the risk regime")
     parser.add_argument("--cost-bps", type=float, default=None,
                         help="Per-side cost; defaults to BACKTEST_COST_BPS")
     parser.add_argument("--split-fraction", type=float, default=0.7)
@@ -222,45 +310,79 @@ def main():
     except ValueError as exc:
         raise SystemExit(str(exc)) from exc
     init_db()
-    bars_by_symbol = {}
-    for symbol in symbols:
-        rows = recent_bars(symbol, args.days)
-        if rows:
-            bars_by_symbol[symbol] = rows
-    if not bars_by_symbol:
-        raise SystemExit("No stored minute bars; run app.services.backfill first")
     snapshot = latest_account_snapshot()
-    base_config = {
-        "starting_equity": float(snapshot["equity"]) if snapshot else 100_000.0,
-        "intraday_allocation_pct": settings.intraday_allocation_pct,
-        "stop_loss_pct": settings.stop_loss_pct,
-        "take_profit_pct": settings.take_profit_pct,
-        "cost_bps_per_side": (settings.backtest_cost_bps if args.cost_bps is None
-                              else args.cost_bps),
-        "max_trade_risk_pct": min(settings.max_trade_risk_pct, 0.01),
-        "max_portfolio_open_risk_pct": settings.max_portfolio_open_risk_pct,
-        "max_symbol_exposure_pct": settings.max_symbol_exposure_pct,
-        "max_sector_exposure_pct": settings.max_sector_exposure_pct,
-        "max_open_positions": settings.max_open_positions,
-        "intraday_entry_start_minutes": settings.intraday_entry_start_minutes,
-        "intraday_entry_cutoff_minutes": settings.intraday_entry_cutoff_minutes,
-        "intraday_flatten_minutes": settings.intraday_flatten_minutes,
-        "split_fraction": args.split_fraction,
-    }
-    variants = build_variants(
-        _floats(args.spreads), _floats(args.rsis),
-        _fast_slows(args.fast_slows),
-        [item.strip() for item in args.exit_styles.split(",") if item.strip()],
-        [item.strip() for item in args.premises.split(",") if item.strip()],
-    )
-    sectors = {symbol: sector_for_symbol(symbol, settings) for symbol in bars_by_symbol}
-    log.info("Running %s variants over %s symbols and %s bars",
-             len(variants), len(bars_by_symbol),
-             sum(len(rows) for rows in bars_by_symbol.values()))
-    rows = run_grid(
-        bars_by_symbol, sectors, base_config, variants,
-        persist=args.persist, min_oos_trades=args.min_oos_trades,
-        confidence=settings.validation_confidence)
+    starting_equity = float(snapshot["equity"]) if snapshot else 100_000.0
+
+    if args.mode == "daily":
+        days = args.days if args.days is not None else 700
+        regime_smas = _ints(args.regime_smas)
+        bars_by_symbol = {}
+        for symbol in symbols:
+            rows = recent_daily_bars(symbol, days)
+            if len(rows) >= 220:
+                bars_by_symbol[symbol] = rows
+        if not bars_by_symbol:
+            raise SystemExit("No stored daily bars; run backfill --timeframe day")
+        regime_bars = recent_daily_bars(args.regime_symbol.upper(), days)
+        if len(regime_bars) < max(regime_smas) + 1:
+            raise SystemExit(
+                f"Not enough daily bars for regime symbol {args.regime_symbol}; "
+                "backfill it first")
+        base_config = daily_config(
+            settings, starting_equity, cost_bps=args.cost_bps,
+            split_fraction=args.split_fraction)
+        variants = build_daily_variants(regime_smas)
+        sectors = {symbol: sector_for_symbol(symbol, settings)
+                   for symbol in bars_by_symbol}
+        log.info("Running %s daily variants over %s symbols and %s bars",
+                 len(variants), len(bars_by_symbol),
+                 sum(len(rows) for rows in bars_by_symbol.values()))
+        rows = run_daily_grid(
+            bars_by_symbol, regime_bars, sectors, base_config, variants,
+            persist=args.persist, min_oos_trades=args.min_oos_trades,
+            confidence=settings.validation_confidence)
+    else:
+        days = args.days if args.days is not None else 12000
+        bars_by_symbol = {}
+        for symbol in symbols:
+            rows = recent_bars(symbol, days)
+            if rows:
+                bars_by_symbol[symbol] = rows
+        if not bars_by_symbol:
+            raise SystemExit("No stored minute bars; run app.services.backfill first")
+        base_config = {
+            "starting_equity": starting_equity,
+            "intraday_allocation_pct": settings.intraday_allocation_pct,
+            "stop_loss_pct": settings.stop_loss_pct,
+            "take_profit_pct": settings.take_profit_pct,
+            "cost_bps_per_side": (settings.backtest_cost_bps
+                                  if args.cost_bps is None else args.cost_bps),
+            "max_trade_risk_pct": min(settings.max_trade_risk_pct, 0.01),
+            "max_portfolio_open_risk_pct": settings.max_portfolio_open_risk_pct,
+            "max_symbol_exposure_pct": settings.max_symbol_exposure_pct,
+            "max_sector_exposure_pct": settings.max_sector_exposure_pct,
+            "max_open_positions": settings.max_open_positions,
+            "intraday_entry_start_minutes": settings.intraday_entry_start_minutes,
+            "intraday_entry_cutoff_minutes": settings.intraday_entry_cutoff_minutes,
+            "intraday_flatten_minutes": settings.intraday_flatten_minutes,
+            "split_fraction": args.split_fraction,
+        }
+        variants = build_variants(
+            _floats(args.spreads), _floats(args.rsis),
+            _fast_slows(args.fast_slows),
+            [item.strip() for item in args.exit_styles.split(",") if item.strip()],
+            [item.strip() for item in args.premises.split(",") if item.strip()],
+        )
+        sectors = {symbol: sector_for_symbol(symbol, settings)
+                   for symbol in bars_by_symbol}
+        log.info("Running %s variants over %s symbols and %s bars",
+                 len(variants), len(bars_by_symbol),
+                 sum(len(rows) for rows in bars_by_symbol.values()))
+        rows = run_grid(
+            bars_by_symbol, sectors, base_config, variants,
+            persist=args.persist, min_oos_trades=args.min_oos_trades,
+            confidence=settings.validation_confidence)
+
     print_table(rows)
     promoted = [row for row in rows if row["validated"]]
     print(f"\npromoted {len(promoted)} of {len(rows)} variants (out-of-sample trade "

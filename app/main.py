@@ -11,7 +11,8 @@ from app.database import (account_fee_activities, broker_activity_summary,
                           minute_bar_coverage, recent_bars, recent_daily_bars,
                           save_position_assignment, save_strategy_validation)
 from app.export_names import export_filename
-from app.portfolio_daily_sim import simulate_daily_portfolio
+from app.portfolio_daily_sim import (daily_config, daily_validation_params,
+                                     simulate_daily_portfolio)
 from app.portfolio_sim import simulate_portfolio
 from app.research import evaluate_ohlc_walk_forward
 from app.settings import get_settings, strategy_config
@@ -422,6 +423,9 @@ def research_daily_portfolio(
     cost_bps: float | None = Query(default=None, ge=0, le=100),
     split_fraction: float | None = Query(default=None, ge=0.5, le=0.9),
     persist: bool = Query(default=False),
+    regime_filter: bool = Query(default=False),
+    regime_sma: int = Query(default=200, ge=20, le=300),
+    regime_symbol: str = Query(default="SPY"),
 ):
     """Portfolio-level simulation of the daily swing and core pools.
 
@@ -447,42 +451,31 @@ def research_daily_portfolio(
             raise HTTPException(
                 status_code=404,
                 detail="No stored daily bars; run the backfill with --timeframe day")
+        regime_bars = []
+        if regime_filter:
+            regime_bars = recent_daily_bars(regime_symbol.upper(), days)
+            if len(regime_bars) < regime_sma + 1:
+                raise HTTPException(
+                    status_code=404,
+                    detail=(f"Not enough stored daily bars for regime symbol "
+                            f"{regime_symbol.upper()}; backfill it first"))
         snapshot = latest_account_snapshot()
-        config = {
-            "starting_equity": float(snapshot["equity"]) if snapshot else 100_000.0,
-            "swing_allocation_pct": settings.swing_allocation_pct,
-            "core_allocation_pct": settings.core_allocation_pct,
-            "swing_sma": 20,
-            "swing_atr_period": settings.swing_atr_period,
-            "swing_atr_multiple": settings.swing_atr_multiple,
-            "core_fast": 50,
-            "core_slow": 200,
-            "core_stop_loss_pct": settings.core_stop_loss_pct,
-            "max_trade_risk_pct": min(settings.max_trade_risk_pct, 0.01),
-            "max_portfolio_open_risk_pct": 0.05,
-            "max_symbol_exposure_pct": settings.max_symbol_exposure_pct,
-            "max_sector_exposure_pct": settings.max_sector_exposure_pct,
-            "max_open_positions": settings.max_open_positions,
-            "cost_bps_per_side": (settings.backtest_cost_bps
-                                  if cost_bps is None else cost_bps),
-            "split_fraction": split_fraction if split_fraction is not None else 0.7,
-        }
+        config = daily_config(
+            settings,
+            float(snapshot["equity"]) if snapshot else 100_000.0,
+            cost_bps=cost_bps,
+            split_fraction=(split_fraction if split_fraction is not None else 0.7),
+            regime_filter_enabled=regime_filter,
+            regime_sma=regime_sma,
+        )
         result = simulate_daily_portfolio(
             bars_by_symbol, config,
             sectors={symbol: sector_for_symbol(symbol, settings)
                      for symbol in bars_by_symbol},
             validation={"confidence": settings.validation_confidence},
+            regime_bars=regime_bars,
         )
-        identity = config_key("daily-swing-core", {
-            "swing_sma": config["swing_sma"],
-            "swing_atr_period": config["swing_atr_period"],
-            "swing_atr_multiple": config["swing_atr_multiple"],
-            "core_fast": config["core_fast"],
-            "core_slow": config["core_slow"],
-            "core_stop_loss_pct": config["core_stop_loss_pct"],
-            "cost_bps_per_side": config["cost_bps_per_side"],
-            "split_fraction": config["split_fraction"],
-        })
+        identity = config_key("daily-swing-core", daily_validation_params(config))
         oos_section = result.get("out_of_sample") or {}
         oos = oos_section.get("significance", {})
         oos_benchmark = oos_section.get("benchmark_relative")

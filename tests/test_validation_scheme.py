@@ -43,6 +43,16 @@ class ValidationStorageTests(unittest.TestCase):
         params = db.execute.call_args.args[1]
         self.assertEqual(params[-1], 2)
 
+    def test_purge_removes_only_older_schemes(self):
+        db = MagicMock()
+        db.execute.return_value.rowcount = 12
+        with patch.object(database, "connect") as connect:
+            connect.return_value.__enter__.return_value = db
+            deleted = database.purge_strategy_validation_before_scheme(3)
+
+        self.assertEqual(deleted, 12)
+        self.assertEqual(db.execute.call_args.args[1], (3,))
+
     def test_latest_filters_on_the_current_scheme(self):
         db = MagicMock()
         db.execute.return_value.fetchone.return_value = {"validated": True}

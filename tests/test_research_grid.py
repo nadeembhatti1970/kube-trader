@@ -144,5 +144,38 @@ class RunGridTests(unittest.TestCase):
         save.assert_not_called()
 
 
+DAILY_BASE = {
+    "swing_allocation_pct": 0.30, "core_allocation_pct": 0.50,
+    "swing_sma": 20, "swing_atr_period": 14, "swing_atr_multiple": 2.0,
+    "core_fast": 50, "core_slow": 200, "core_stop_loss_pct": 0.20,
+    "cost_bps_per_side": 5.0, "split_fraction": 0.7,
+}
+
+
+class DailyGridTests(unittest.TestCase):
+    def test_variants_include_a_baseline_and_each_regime(self):
+        variants = research_grid.build_daily_variants([50, 200])
+        self.assertEqual([item["label"] for item in variants],
+                         ["no-regime", "regime50", "regime200"])
+        self.assertFalse(variants[0]["regime_filter_enabled"])
+        self.assertTrue(variants[1]["regime_filter_enabled"])
+
+    def test_daily_grid_ranks_and_persists_out_of_sample_verdicts(self):
+        with patch.object(research_grid, "simulate_daily_portfolio",
+                          return_value=fake_result(0.5, 40, 0.2, 0.9)), \
+                patch.object(research_grid, "save_strategy_validation") as save:
+            rows = research_grid.run_daily_grid(
+                {"AAPL": []}, [], {}, DAILY_BASE,
+                research_grid.build_daily_variants([200]),
+                persist=True, min_oos_trades=30)
+
+        self.assertEqual(len(rows), 2)
+        self.assertTrue(all(row["validated"] for row in rows))
+        self.assertEqual(save.call_count, 2)
+        args = save.call_args.args
+        self.assertEqual(args[1], "daily-swing-core-v1")
+        self.assertAlmostEqual(args[4], 0.5)
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -900,6 +900,15 @@ def save_strategy_validation(config_hash: str, strategy: str, config: dict,
               scheme_version))
 
 
+def purge_strategy_validation_before_scheme(scheme_version: int) -> int:
+    """Delete verdicts produced by older validation schemes; returns the count."""
+    with connect() as db:
+        result = db.execute(
+            "DELETE FROM strategy_validation WHERE scheme_version < %s",
+            (scheme_version,))
+        return int(result.rowcount or 0)
+
+
 def latest_strategy_validation(config_hash: str,
                                scheme_version: int = VALIDATION_SCHEME_VERSION):
     """Only a record from the current validation scheme can satisfy a gate."""
