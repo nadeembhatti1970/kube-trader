@@ -430,7 +430,10 @@ def simulate_portfolio(bars_by_symbol: dict[str, list[dict]], config: dict | Non
                 continue
             since_open = _minutes_since_open(moment)
             remaining = _minutes_to_close(moment)
-            if since_open < float(effective["intraday_entry_start_minutes"]):
+            # The gap premise is defined at the open, so the post-open guard
+            # would otherwise reject every session's first bar.
+            if (premise != "gap_up"
+                    and since_open < float(effective["intraday_entry_start_minutes"])):
                 continue
             if remaining <= max(float(effective["intraday_entry_cutoff_minutes"]),
                                 float(effective["intraday_flatten_minutes"])):
