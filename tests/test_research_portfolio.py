@@ -56,6 +56,8 @@ class PortfolioResearchEndpointTests(unittest.TestCase):
         self.assertEqual(body["period"]["symbols"], 1)
         self.assertIn("significance", body)
         self.assertIn("config_hash", body["validation"])
+        self.assertTrue(body["validation"]["benchmark_relative_required"])
+        self.assertIn("benchmark_relative", body["out_of_sample"])
         self.assertFalse(body["validation"]["validated"])
         self.assertFalse(body["persisted"])
         self.assertIn("metrics", body)
@@ -184,7 +186,9 @@ class PortfolioResearchEndpointTests(unittest.TestCase):
         body = response.json()
         self.assertEqual(body["status"], "ok")
         self.assertIn("out_of_sample", body)
+        self.assertIn("benchmark_relative", body["out_of_sample"])
         self.assertEqual(body["validation"]["namespace"], "daily-swing-core")
+        self.assertTrue(body["validation"]["benchmark_relative_required"])
         self.assertFalse(body["validation"]["validated"])
 
     def test_daily_endpoint_requires_daily_bars(self):

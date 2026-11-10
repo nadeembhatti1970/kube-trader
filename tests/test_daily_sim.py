@@ -68,6 +68,8 @@ class DailySimulationTests(unittest.TestCase):
                                out_of_sample["equity"]["starting"])
         self.assertIn("significance", out_of_sample)
         self.assertIn("benchmark", out_of_sample)
+        self.assertIn("benchmark_relative", out_of_sample)
+        self.assertGreater(result["benchmark_relative"]["periods"], 0)
 
     def test_no_data_returns_a_stable_shape(self):
         result = simulate_daily_portfolio({}, BASE)

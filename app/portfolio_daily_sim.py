@@ -189,6 +189,7 @@ def simulate_daily_portfolio(bars_by_symbol: dict[str, list[dict]],
     trades: list[dict] = []
     cost_events: list[tuple[date, float]] = []
     turnover_events: list[tuple[date, float]] = []
+    excess_points: list[tuple[date, float]] = []
     cost_rate = float(effective["cost_bps_per_side"]) / 10_000.0
     weights = {pool: float(effective[key]) for pool, key in POOL_WEIGHT_KEYS.items()}
 
@@ -306,8 +307,12 @@ def simulate_daily_portfolio(bars_by_symbol: dict[str, list[dict]],
                 "sector": sector,
             }
 
+        period_returns = []
         for symbol, frame, index in active:
             bar = frame["bars"][index]
+            previous_close = last_close.get(symbol)
+            if previous_close and previous_close > 0:
+                period_returns.append(bar["close"] / previous_close - 1.0)
             last_close[symbol] = bar["close"]
             signals = []
             for pool, series in (("swing", frame["swing_above"]),
@@ -324,8 +329,16 @@ def simulate_daily_portfolio(bars_by_symbol: dict[str, list[dict]],
                     pending[symbol] = ("buy", pool)
 
         invested = position_value()
-        equity_points.append((day, cash + invested))
-        exposures.append(invested / (cash + invested) if cash + invested else 0.0)
+        equity = cash + invested
+        prior_exposure = exposures[-1] if exposures else 0.0
+        strategy_return = (
+            equity / equity_points[-1][1] - 1.0
+            if equity_points and equity_points[-1][1] > 0 else 0.0)
+        universe_return = (mean(period_returns) if period_returns else 0.0)
+        excess_points.append(
+            (day, strategy_return - universe_return * prior_exposure))
+        equity_points.append((day, equity))
+        exposures.append(invested / equity if equity else 0.0)
 
     final_equity = cash + position_value()
     confidence = float((validation or {}).get("confidence", 0.95))
@@ -353,6 +366,34 @@ def simulate_daily_portfolio(bars_by_symbol: dict[str, list[dict]],
             if len(bars) >= 2 and bars[0]["close"] > 0:
                 values.append(bars[-1]["close"] / bars[0]["close"] - 1.0)
         return mean(values) * 100 if values else None
+
+    def benchmark_relative_for(start: date, end: date | None):
+        values = [value for moment, value in excess_points
+                  if moment >= start and (end is None or moment < end)]
+        if not values:
+            return {"basis": "daily excess return", "granularity": "day",
+                    "periods": 0, "mean_excess_pct": None, "ci_low_pct": None,
+                    "ci_high_pct": None, "ci_above_zero": False,
+                    "minimum_detectable_edge_pct": None}
+        summary = significance_summary(
+            values, confidence=confidence, block_size=block_size,
+            samples=samples, seed=seed)
+
+        def pct(key):
+            value = summary.get(key)
+            return value * 100 if value is not None else None
+
+        return {
+            "basis": ("daily strategy return minus equal-weight universe return "
+                      "times the prior period's exposure"),
+            "granularity": "day",
+            "periods": len(values),
+            "mean_excess_pct": pct("mean"),
+            "ci_low_pct": pct("ci_low"),
+            "ci_high_pct": pct("ci_high"),
+            "ci_above_zero": summary["ci_above_zero"],
+            "minimum_detectable_edge_pct": pct("minimum_detectable_edge"),
+        }
 
     metrics = metrics_for(equity_points, exposures, trades,
                           sum(value for _, value in cost_events),
@@ -404,6 +445,7 @@ def simulate_daily_portfolio(bars_by_symbol: dict[str, list[dict]],
                     if segment_metrics.get("total_return_pct") is not None
                     and at_exposure is not None else None),
             },
+            "benchmark_relative": benchmark_relative_for(start, end),
         }
 
     split_fraction = float(effective["split_fraction"])
@@ -447,6 +489,7 @@ def simulate_daily_portfolio(bars_by_symbol: dict[str, list[dict]],
                      "The exposure-matched figure scales that return by the average "
                      "invested share."),
         },
+        "benchmark_relative": benchmark_relative_for(days[0], None),
         "trades": trades[-500:],
         "limitations": [
             "Swing and core daily rules only; the intraday pools are not simulated.",

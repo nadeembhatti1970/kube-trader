@@ -364,21 +364,27 @@ def research_portfolio(
         })
         identity = validation_config_key(candidate)
         full_significance = result.get("significance", {})
-        oos_significance = (result.get("out_of_sample") or {}).get("significance", {})
-        validated = validation_verdict(oos_significance, settings.validation_min_trades)
+        out_of_sample = result.get("out_of_sample") or {}
+        oos_significance = out_of_sample.get("significance", {})
+        oos_benchmark = out_of_sample.get("benchmark_relative")
+        validated = validation_verdict(
+            oos_significance, settings.validation_min_trades, oos_benchmark)
         result["validation"] = {
             "config_hash": identity["key"],
             "config": identity["config"],
             "validated": validated,
             "basis": "out_of_sample",
+            "benchmark_relative_required": True,
             "scheme_version": identity["scheme_version"],
             "namespace": identity["namespace"],
             "minimum_trades": settings.validation_min_trades,
             "required_by_execution": settings.require_validated_strategy,
             "note": (
                 "Validated means the out-of-sample bootstrap interval for the mean net "
-                "trade return is entirely above zero and the out-of-sample sample meets "
-                "the minimum trade count. It is not a guarantee of future returns."
+                "trade return is entirely above zero, the out-of-sample sample meets "
+                "the minimum trade count, and the out-of-sample excess return over the "
+                "equal-weight benchmark at the same exposure is also above zero. It is "
+                "not a guarantee of future returns."
             ),
         }
         if persist:
@@ -390,6 +396,7 @@ def research_portfolio(
                     "metrics": result.get("metrics"),
                     "significance_full_window": full_significance,
                     "significance_out_of_sample": oos_significance,
+                    "benchmark_relative_out_of_sample": oos_benchmark,
                     "in_sample": result.get("in_sample"),
                     "out_of_sample": result.get("out_of_sample"),
                     "period": result.get("period"),
@@ -476,8 +483,11 @@ def research_daily_portfolio(
             "cost_bps_per_side": config["cost_bps_per_side"],
             "split_fraction": config["split_fraction"],
         })
-        oos = (result.get("out_of_sample") or {}).get("significance", {})
-        validated = validation_verdict(oos, settings.validation_min_trades)
+        oos_section = result.get("out_of_sample") or {}
+        oos = oos_section.get("significance", {})
+        oos_benchmark = oos_section.get("benchmark_relative")
+        validated = validation_verdict(
+            oos, settings.validation_min_trades, oos_benchmark)
         result["validation"] = {
             "config_hash": identity["key"],
             "config": identity["config"],
@@ -485,6 +495,7 @@ def research_daily_portfolio(
             "scheme_version": identity["scheme_version"],
             "validated": validated,
             "basis": "out_of_sample",
+            "benchmark_relative_required": True,
             "minimum_trades": settings.validation_min_trades,
             "required_by_execution": settings.require_validated_strategy,
             "note": (
@@ -501,6 +512,7 @@ def research_daily_portfolio(
                 {
                     "basis": "out_of_sample",
                     "config": config,
+                    "benchmark_relative_out_of_sample": oos_benchmark,
                     "in_sample": result.get("in_sample"),
                     "out_of_sample": result.get("out_of_sample"),
                     "metrics": result.get("metrics"),

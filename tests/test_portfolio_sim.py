@@ -235,6 +235,13 @@ class PortfolioSimulationTests(unittest.TestCase):
             simulate_portfolio({"AAPL": bars_from(breakout_path())},
                                {**BASE, "exit_style": "trailing"})
 
+    def test_reports_benchmark_relative_excess_for_full_and_oos(self):
+        result = simulate_portfolio({"AAPL": bars_from(breakout_path())}, BASE)
+
+        self.assertIn("ci_above_zero", result["benchmark_relative"])
+        self.assertGreater(result["benchmark_relative"]["periods"], 0)
+        self.assertIn("benchmark_relative", result["out_of_sample"])
+
     def test_benchmark_reports_exposure_matched_return(self):
         result = simulate_portfolio({"AAPL": bars_from(breakout_path())}, BASE)
         benchmark = result["benchmark"]
@@ -293,6 +300,13 @@ class SignificanceTests(unittest.TestCase):
         self.assertFalse(validation_verdict(strong, min_trades=1000))
         weak = significance_summary([1.0, -1.0] * 20)
         self.assertFalse(validation_verdict(weak, min_trades=10))
+
+    def test_benchmark_relative_edge_is_required_when_supplied(self):
+        strong = significance_summary([1.0, 1.1, 0.9, 1.2, 0.95] * 10)
+        self.assertFalse(validation_verdict(
+            strong, min_trades=10, benchmark_relative={"ci_above_zero": False}))
+        self.assertTrue(validation_verdict(
+            strong, min_trades=10, benchmark_relative={"ci_above_zero": True}))
 
     def test_config_key_ignores_unrelated_settings(self):
         base = {"strategy": "sma-crossover-confirmed-v1", "signal_fast_bars": 5,

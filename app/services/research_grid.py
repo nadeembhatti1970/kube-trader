@@ -107,10 +107,12 @@ def run_grid(bars_by_symbol: dict[str, list[dict]], sectors: dict[str, str],
         out_of_sample = result.get("out_of_sample") or {}
         significance = out_of_sample.get("significance") or {}
         oos_metrics = out_of_sample.get("metrics") or {}
+        benchmark_relative = out_of_sample.get("benchmark_relative") or {}
         in_sample = result.get("in_sample") or {}
         mean = significance.get("mean")
         gross = mean + cost if mean is not None else None
-        validated = validation_verdict(significance, min_oos_trades)
+        validated = validation_verdict(
+            significance, min_oos_trades, benchmark_relative)
         row = {
             "variant": variant,
             "label": variant_label(variant),
@@ -123,6 +125,9 @@ def run_grid(bars_by_symbol: dict[str, list[dict]], sectors: dict[str, str],
             "oos_pf": oos_metrics.get("profit_factor"),
             "oos_return_pct": oos_metrics.get("total_return_pct"),
             "oos_exposure_pct": oos_metrics.get("average_exposure_pct"),
+            "oos_excess_pct": benchmark_relative.get("mean_excess_pct"),
+            "oos_excess_ci_low": benchmark_relative.get("ci_low_pct"),
+            "oos_excess_ci_high": benchmark_relative.get("ci_high_pct"),
             "validated": validated,
         }
         if persist:
@@ -137,6 +142,7 @@ def run_grid(bars_by_symbol: dict[str, list[dict]], sectors: dict[str, str],
                     "config": config,
                     "in_sample": in_sample,
                     "out_of_sample": out_of_sample,
+                    "benchmark_relative_out_of_sample": benchmark_relative,
                     "metrics": result.get("metrics"),
                     "period": result.get("period"),
                 },
@@ -150,8 +156,9 @@ def run_grid(bars_by_symbol: dict[str, list[dict]], sectors: dict[str, str],
 
 
 def print_table(rows: list[dict]) -> None:
-    header = (f"{'variant':30s} {'ISn':>4s} {'OOSn':>5s} {'OOS gross':>10s} "
-              f"{'OOS net':>9s} {'OOS 95% CI':>19s} {'PF':>5s} {'promoted':>8s}")
+    header = (f"{'variant':40s} {'ISn':>4s} {'OOSn':>5s} {'OOS gross':>10s} "
+              f"{'OOS net':>9s} {'OOS 95% CI':>19s} {'excess':>9s} {'exCIlo':>8s} "
+              f"{'PF':>5s} {'promoted':>8s}")
     print(header)
     print("-" * len(header))
     for row in rows:
@@ -161,9 +168,14 @@ def print_table(rows: list[dict]) -> None:
             interval = "-"
         else:
             interval = f"{row['oos_ci_low']:+.3f} .. {row['oos_ci_high']:+.3f}"
+        excess = ("-" if row["oos_excess_pct"] is None
+                  else f"{row['oos_excess_pct']:+.3f}%")
+        excess_low = ("-" if row["oos_excess_ci_low"] is None
+                      else f"{row['oos_excess_ci_low']:+.3f}")
         pf = "-" if row["oos_pf"] is None else f"{row['oos_pf']:.2f}"
-        print(f"{row['label']:30s} {row['is_trades']:4d} {row['oos_trades']:5d} "
-              f"{gross:>10s} {net:>9s} {interval:>19s} {pf:>5s} "
+        print(f"{row['label']:40s} {row['is_trades']:4d} {row['oos_trades']:5d} "
+              f"{gross:>10s} {net:>9s} {interval:>19s} {excess:>9s} "
+              f"{excess_low:>8s} {pf:>5s} "
               f"{'yes' if row['validated'] else 'no':>8s}")
 
 
@@ -251,8 +263,9 @@ def main():
         confidence=settings.validation_confidence)
     print_table(rows)
     promoted = [row for row in rows if row["validated"]]
-    print(f"\npromoted {len(promoted)} of {len(rows)} variants "
-          f"(out-of-sample CI above zero and at least {args.min_oos_trades} trades)")
+    print(f"\npromoted {len(promoted)} of {len(rows)} variants (out-of-sample trade "
+          f"CI above zero, at least {args.min_oos_trades} trades, and out-of-sample "
+          f"excess return over the same-exposure benchmark also above zero)")
     if promoted:
         print("strictly promote on out-of-sample evidence only; this is not a guarantee.")
 

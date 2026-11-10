@@ -8,7 +8,7 @@ watchlist symbols at once, and reports the uncertainty around the result.
 """
 import math
 from collections import defaultdict
-from datetime import datetime, timezone
+from datetime import date, datetime, timezone
 from zoneinfo import ZoneInfo
 
 from app.services.signals import rsi
@@ -316,6 +316,7 @@ def simulate_portfolio(bars_by_symbol: dict[str, list[dict]], config: dict | Non
     total_cost = 0.0
     cost_events: list[tuple[datetime, float]] = []
     turnover_events: list[tuple[datetime, float]] = []
+    excess_points: list[tuple[datetime, float]] = []
     cost_rate = float(effective["cost_bps_per_side"]) / 10_000.0
 
     def position_value() -> float:
@@ -491,8 +492,12 @@ def simulate_portfolio(bars_by_symbol: dict[str, list[dict]], config: dict | Non
             }
 
         # Evaluate signals at the close and queue execution for the next bar.
+        period_returns = []
         for symbol, frame, index in active:
             bar = frame["bars"][index]
+            previous_close = last_close.get(symbol)
+            if previous_close and previous_close > 0:
+                period_returns.append(bar["close"] / previous_close - 1.0)
             last_close[symbol] = bar["close"]
             if premise == "opening_range_breakout":
                 if frame["orb_entry"][index] and symbol not in positions:
@@ -520,8 +525,17 @@ def simulate_portfolio(bars_by_symbol: dict[str, list[dict]], config: dict | Non
                     pending[symbol] = "sell"
 
         invested = position_value()
-        equity_points.append((moment, cash + invested))
-        exposures.append(invested / (cash + invested) if cash + invested else 0.0)
+        equity = cash + invested
+        prior_exposure = exposures[-1] if exposures else 0.0
+        strategy_return = (
+            equity / equity_points[-1][1] - 1.0
+            if equity_points and equity_points[-1][1] > 0 else 0.0)
+        universe_return = (sum(period_returns) / len(period_returns)
+                           if period_returns else 0.0)
+        excess_points.append(
+            (moment, strategy_return - universe_return * prior_exposure))
+        equity_points.append((moment, equity))
+        exposures.append(invested / equity if equity else 0.0)
 
     final_equity = cash + position_value()
     confidence = float((validation or {}).get("confidence", 0.95))
@@ -551,6 +565,40 @@ def simulate_portfolio(bars_by_symbol: dict[str, list[dict]], config: dict | Non
             if len(bars) >= 2 and bars[0]["close"] > 0:
                 values.append(bars[-1]["close"] / bars[0]["close"] - 1.0)
         return sum(values) / len(values) * 100 if values else None
+
+    def benchmark_relative_for(start_ts, end_ts):
+        # Aggregate minute excess to daily excess so the bootstrap runs on a
+        # session-level series rather than tens of thousands of minute steps.
+        buckets: dict[date, float] = defaultdict(float)
+        for moment, value in excess_points:
+            if moment < start_ts or (end_ts is not None and moment >= end_ts):
+                continue
+            buckets[moment.astimezone(NY).date()] += value
+        values = [buckets[key] for key in sorted(buckets)]
+        if not values:
+            return {"basis": "daily excess return", "granularity": "day",
+                    "periods": 0, "mean_excess_pct": None, "ci_low_pct": None,
+                    "ci_high_pct": None, "ci_above_zero": False,
+                    "minimum_detectable_edge_pct": None}
+        summary = significance_summary(
+            values, confidence=confidence, block_size=block_size,
+            samples=samples, seed=seed)
+
+        def pct(key):
+            value = summary.get(key)
+            return value * 100 if value is not None else None
+
+        return {
+            "basis": ("daily strategy return minus equal-weight universe return "
+                      "times the prior period's exposure"),
+            "granularity": "day",
+            "periods": len(values),
+            "mean_excess_pct": pct("mean"),
+            "ci_low_pct": pct("ci_low"),
+            "ci_high_pct": pct("ci_high"),
+            "ci_above_zero": summary["ci_above_zero"],
+            "minimum_detectable_edge_pct": pct("minimum_detectable_edge"),
+        }
 
     metrics = metrics_for(equity_points, exposures, trades, total_cost, turnover)
     significance = significance_for(trades)
@@ -600,6 +648,7 @@ def simulate_portfolio(bars_by_symbol: dict[str, list[dict]], config: dict | Non
                     if segment_metrics.get("total_return_pct") is not None
                     and at_exposure is not None else None),
             },
+            "benchmark_relative": benchmark_relative_for(start_ts, end_ts),
         }
 
     split_fraction = float(effective["split_fraction"])
@@ -646,6 +695,7 @@ def simulate_portfolio(bars_by_symbol: dict[str, list[dict]], config: dict | Non
                 "market decline."
             ),
         },
+        "benchmark_relative": benchmark_relative_for(timestamps[0], None),
         "trades": trades[-500:],
         "limitations": [
             "One long position per symbol; partial fills and market impact are not modelled.",

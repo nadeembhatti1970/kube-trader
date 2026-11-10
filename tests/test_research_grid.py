@@ -4,7 +4,8 @@ from unittest.mock import patch
 from app.services import research_grid
 
 
-def fake_result(oos_mean, n, ci_low, ci_high, pf=1.2):
+def fake_result(oos_mean, n, ci_low, ci_high, pf=1.2,
+                excess_above_zero=True):
     return {
         "out_of_sample": {
             "significance": {
@@ -13,6 +14,10 @@ def fake_result(oos_mean, n, ci_low, ci_high, pf=1.2):
             },
             "metrics": {"profit_factor": pf, "total_return_pct": 0.1,
                         "average_exposure_pct": 0.5},
+            "benchmark_relative": {
+                "mean_excess_pct": 0.05, "ci_low_pct": 0.01,
+                "ci_high_pct": 0.1, "ci_above_zero": excess_above_zero,
+            },
         },
         "in_sample": {"significance": {"n": 40}},
         "metrics": {"closed_trades": 50},
@@ -90,6 +95,16 @@ class RunGridTests(unittest.TestCase):
             rows = research_grid.run_grid(
                 {"AAPL": []}, {}, BASE, self.variants()[:1], min_oos_trades=30)
 
+        self.assertFalse(rows[0]["validated"])
+
+    def test_missing_benchmark_edge_blocks_promotion(self):
+        with patch.object(research_grid, "simulate_portfolio",
+                          return_value=fake_result(0.25, 60, 0.10, 0.40,
+                                                   excess_above_zero=False)):
+            rows = research_grid.run_grid(
+                {"AAPL": []}, {}, BASE, self.variants()[:1], min_oos_trades=30)
+
+        self.assertTrue(rows[0]["oos_ci_low"] > 0)
         self.assertFalse(rows[0]["validated"])
 
     def test_spread_that_spans_zero_is_not_promoted(self):
