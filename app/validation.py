@@ -18,7 +18,7 @@ VALIDATION_KEYS = (
     "swing_atr_period", "swing_atr_multiple", "core_stop_loss_pct",
     "entry_order_type", "entry_limit_offset_bps",
     "min_hold_minutes", "exit_confirmation_spread_pct", "exit_style",
-    "trailing_stop_pct", "resample_minutes",
+    "trailing_stop_pct", "resample_minutes", "split_fraction",
 )
 Z_SCORES = {0.90: 1.645, 0.95: 1.960, 0.99: 2.576}
 # Live provenance records only execution settings, so simulator-only keys are
@@ -29,6 +29,7 @@ SIMULATOR_DEFAULTS = {
     "exit_style": "signal",
     "trailing_stop_pct": 0.0,
     "resample_minutes": 1,
+    "split_fraction": 0.7,
 }
 
 
@@ -62,7 +63,10 @@ def block_bootstrap_ci(values: list[float], block_size: int = 5, samples: int = 
         raise ValueError("samples must be at least 1")
     if confidence not in Z_SCORES:
         raise ValueError(f"confidence must be one of {sorted(Z_SCORES)}")
-    block = max(1, min(block_size, len(values)))
+    # A block as long as the sample can only ever resample the whole series, which
+    # would report a zero-width interval for tiny samples. Leave at least one
+    # element of variation between blocks.
+    block = max(1, min(block_size, len(values) - 1))
     rng = random.Random(seed)
     count = len(values)
     means = []

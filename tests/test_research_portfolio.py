@@ -117,6 +117,26 @@ class PortfolioResearchEndpointTests(unittest.TestCase):
             protective["validation"]["config_hash"],
         )
 
+    def test_split_fraction_is_reported(self):
+        with patch.object(main, "latest_universe_snapshot",
+                          return_value=[{"symbol": "AAPL", "selected": True}]), \
+                patch.object(main, "recent_bars", return_value=rising_bars()), \
+                patch.object(main, "latest_account_snapshot",
+                             return_value={"equity": 100_000.0}):
+            response = self.client.get(
+                "/research/portfolio", params={"days": 500, "split_fraction": 0.6})
+
+        self.assertEqual(response.status_code, 200)
+        body = response.json()
+        self.assertEqual(body["split_fraction"], 0.6)
+        self.assertIn("in_sample", body)
+        self.assertIn("out_of_sample", body)
+
+    def test_invalid_split_fraction_returns_bad_request(self):
+        response = self.client.get(
+            "/research/portfolio", params={"split_fraction": 0.95})
+        self.assertEqual(response.status_code, 422)
+
     def test_invalid_exit_style_returns_bad_request(self):
         response = self.client.get(
             "/research/portfolio", params={"exit_style": "magic"})

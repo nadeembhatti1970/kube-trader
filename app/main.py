@@ -263,6 +263,7 @@ def research_portfolio(
     exit_style: str | None = Query(default=None),
     trailing_stop_pct: float | None = Query(default=None, ge=0, le=1),
     resample_minutes: int | None = Query(default=None, ge=1, le=60),
+    split_fraction: float | None = Query(default=None, ge=0.5, le=0.9),
 ):
     """Portfolio-level walk-forward research over the selected watchlist.
 
@@ -325,6 +326,7 @@ def research_portfolio(
             "exit_style": selected_exit_style,
             "trailing_stop_pct": trailing_stop_pct or 0.0,
             "resample_minutes": resample_minutes or 1,
+            "split_fraction": split_fraction if split_fraction is not None else 0.7,
         }
         result = simulate_portfolio(
             bars_by_symbol, config,
@@ -342,30 +344,36 @@ def research_portfolio(
             "exit_style": config["exit_style"],
             "trailing_stop_pct": config["trailing_stop_pct"],
             "resample_minutes": config["resample_minutes"],
+            "split_fraction": config["split_fraction"],
         })
         identity = validation_config_key(candidate)
-        significance = result.get("significance", {})
-        validated = validation_verdict(significance, settings.validation_min_trades)
+        full_significance = result.get("significance", {})
+        oos_significance = (result.get("out_of_sample") or {}).get("significance", {})
+        validated = validation_verdict(oos_significance, settings.validation_min_trades)
         result["validation"] = {
             "config_hash": identity["key"],
             "config": identity["config"],
             "validated": validated,
+            "basis": "out_of_sample",
             "minimum_trades": settings.validation_min_trades,
             "required_by_execution": settings.require_validated_strategy,
             "note": (
-                "Validated means the bootstrap interval for the mean net trade return "
-                "is entirely above zero and the sample meets the minimum trade count. "
-                "It is not a guarantee of future returns."
+                "Validated means the out-of-sample bootstrap interval for the mean net "
+                "trade return is entirely above zero and the out-of-sample sample meets "
+                "the minimum trade count. It is not a guarantee of future returns."
             ),
         }
         if persist:
             save_strategy_validation(
                 identity["key"], candidate.get("strategy", "unknown"), identity["config"],
-                int(significance.get("n") or 0), significance.get("mean"),
-                significance.get("ci_low"), significance.get("ci_high"), validated,
+                int(oos_significance.get("n") or 0), oos_significance.get("mean"),
+                oos_significance.get("ci_low"), oos_significance.get("ci_high"), validated,
                 {
                     "metrics": result.get("metrics"),
-                    "significance": significance,
+                    "significance_full_window": full_significance,
+                    "significance_out_of_sample": oos_significance,
+                    "in_sample": result.get("in_sample"),
+                    "out_of_sample": result.get("out_of_sample"),
                     "period": result.get("period"),
                     "exit_reasons": result.get("exit_reasons"),
                     "benchmark": result.get("benchmark"),

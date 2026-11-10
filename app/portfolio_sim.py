@@ -46,6 +46,8 @@ DEFAULT_CONFIG = {
     "trailing_stop_pct": 0.0,
     # Aggregate minute bars into N-minute bars before evaluating signals.
     "resample_minutes": 1,
+    # Chronological in-sample share of the window; the remainder is out-of-sample.
+    "split_fraction": 0.7,
 }
 
 
@@ -198,6 +200,19 @@ def _metrics(equity_points: list[tuple[datetime, float]], exposures: list[float]
     }
 
 
+def _trade_summary(trades: list[dict]) -> dict:
+    net = [trade["net_return_pct"] for trade in trades]
+    wins = [value for value in net if value > 0]
+    losses = [value for value in net if value < 0]
+    return {
+        "wins": len(wins),
+        "losses": len(losses),
+        "win_rate_pct": len(wins) / len(net) * 100 if net else None,
+        "profit_factor": sum(wins) / abs(sum(losses)) if losses else None,
+        "average_net_trade_return_pct": sum(net) / len(net) if net else None,
+    }
+
+
 def simulate_portfolio(bars_by_symbol: dict[str, list[dict]], config: dict | None = None,
                        sectors: dict[str, str] | None = None,
                        validation: dict | None = None) -> dict:
@@ -224,6 +239,8 @@ def simulate_portfolio(bars_by_symbol: dict[str, list[dict]], config: dict | Non
         raise ValueError("trailing exit_style requires trailing_stop_pct > 0")
     if int(effective["resample_minutes"]) < 1:
         raise ValueError("resample_minutes must be at least 1")
+    if not 0.5 <= float(effective["split_fraction"]) <= 0.9:
+        raise ValueError("split_fraction must be between 0.5 and 0.9")
 
     frames = {}
     for symbol, bars in bars_by_symbol.items():
@@ -245,6 +262,8 @@ def simulate_portfolio(bars_by_symbol: dict[str, list[dict]], config: dict | Non
     trades: list[dict] = []
     turnover = 0.0
     total_cost = 0.0
+    cost_events: list[tuple[datetime, float]] = []
+    turnover_events: list[tuple[datetime, float]] = []
     cost_rate = float(effective["cost_bps_per_side"]) / 10_000.0
 
     def position_value() -> float:
@@ -272,6 +291,8 @@ def simulate_portfolio(bars_by_symbol: dict[str, list[dict]], config: dict | Non
         cash += notional - cost
         turnover += notional
         total_cost += cost
+        cost_events.append((moment, cost))
+        turnover_events.append((moment, notional))
         gross_pct = (price / item["entry_price"] - 1.0) * 100
         net_pct = gross_pct - 2.0 * float(effective["cost_bps_per_side"]) / 100.0
         trades.append({
@@ -395,6 +416,8 @@ def simulate_portfolio(bars_by_symbol: dict[str, list[dict]], config: dict | Non
             cash -= notional + cost
             turnover += notional
             total_cost += cost
+            cost_events.append((moment, cost))
+            turnover_events.append((moment, notional))
             positions[symbol] = {
                 "qty": qty,
                 "entry_price": price,
@@ -432,39 +455,93 @@ def simulate_portfolio(bars_by_symbol: dict[str, list[dict]], config: dict | Non
         exposures.append(invested / (cash + invested) if cash + invested else 0.0)
 
     final_equity = cash + position_value()
-    metrics = _metrics(equity_points, exposures, trades, turnover, total_cost)
-    net_returns = [trade["net_return_pct"] for trade in trades]
-    wins = [value for value in net_returns if value > 0]
-    losses = [value for value in net_returns if value < 0]
     confidence = float((validation or {}).get("confidence", 0.95))
-    significance = significance_summary(
-        net_returns, confidence=confidence,
-        block_size=int((validation or {}).get("block_size", 5)),
-        samples=int((validation or {}).get("samples", 2000)),
-        seed=int((validation or {}).get("seed", 7)),
-    )
-    metrics.update({
-        "closed_trades": len(trades),
-        "wins": len(wins),
-        "losses": len(losses),
-        "win_rate_pct": len(wins) / len(trades) * 100 if trades else None,
-        "profit_factor": (sum(wins) / abs(sum(losses)) if losses else None),
-        "average_net_trade_return_pct": (
-            sum(net_returns) / len(net_returns) if net_returns else None),
-    })
+    block_size = int((validation or {}).get("block_size", 5))
+    samples = int((validation or {}).get("samples", 2000))
+    seed = int((validation or {}).get("seed", 7))
+
+    def metrics_for(equity_segment, exposure_segment, segment_trades,
+                    segment_cost, segment_turnover):
+        result = _metrics(equity_segment, exposure_segment, segment_trades,
+                          segment_turnover, segment_cost)
+        result.update(_trade_summary(segment_trades))
+        result["closed_trades"] = len(segment_trades)
+        return result
+
+    def significance_for(segment_trades):
+        values = [trade["net_return_pct"] for trade in segment_trades]
+        return significance_summary(
+            values, confidence=confidence, block_size=block_size,
+            samples=samples, seed=seed)
+
+    def benchmark_for(start_ts, end_ts):
+        values = []
+        for frame in frames.values():
+            bars = [bar for bar in frame["bars"]
+                    if bar["ts"] >= start_ts and (end_ts is None or bar["ts"] < end_ts)]
+            if len(bars) >= 2 and bars[0]["close"] > 0:
+                values.append(bars[-1]["close"] / bars[0]["close"] - 1.0)
+        return sum(values) / len(values) * 100 if values else None
+
+    metrics = metrics_for(equity_points, exposures, trades, total_cost, turnover)
+    significance = significance_for(trades)
     reasons = defaultdict(int)
     for trade in trades:
         reasons[trade["exit_reason"]] += 1
-    benchmark = []
-    for frame in frames.values():
-        bars = frame["bars"]
-        if len(bars) >= 2 and bars[0]["close"] > 0:
-            benchmark.append(bars[-1]["close"] / bars[0]["close"] - 1.0)
-    benchmark_return = (sum(benchmark) / len(benchmark) * 100 if benchmark else None)
+    benchmark_return = benchmark_for(timestamps[0], None)
     average_exposure = metrics.get("average_exposure_pct")
     benchmark_at_exposure = (
         benchmark_return * average_exposure / 100.0
         if benchmark_return is not None and average_exposure is not None else None)
+
+    def segment(start_ts, end_ts, equity_segment, exposure_segment):
+        segment_trades = [
+            trade for trade in trades
+            if start_ts <= _as_datetime(trade["exit_ts"])
+            and (end_ts is None or _as_datetime(trade["exit_ts"]) < end_ts)
+        ]
+        segment_cost = sum(
+            value for moment, value in cost_events
+            if moment >= start_ts and (end_ts is None or moment < end_ts))
+        segment_turnover = sum(
+            value for moment, value in turnover_events
+            if moment >= start_ts and (end_ts is None or moment < end_ts))
+        segment_metrics = metrics_for(
+            equity_segment, exposure_segment, segment_trades,
+            segment_cost, segment_turnover)
+        segment_benchmark = benchmark_for(start_ts, end_ts)
+        exposure = segment_metrics.get("average_exposure_pct")
+        at_exposure = (
+            segment_benchmark * exposure / 100.0
+            if segment_benchmark is not None and exposure is not None else None)
+        return {
+            "timestamps": len(equity_segment),
+            "trades": len(segment_trades),
+            "equity": {
+                "starting": equity_segment[0][1] if equity_segment else None,
+                "final": equity_segment[-1][1] if equity_segment else None,
+            },
+            "metrics": segment_metrics,
+            "significance": significance_for(segment_trades),
+            "benchmark": {
+                "return_pct": segment_benchmark,
+                "return_at_average_exposure_pct": at_exposure,
+                "excess_return_at_exposure_pct": (
+                    segment_metrics["total_return_pct"] - at_exposure
+                    if segment_metrics.get("total_return_pct") is not None
+                    and at_exposure is not None else None),
+            },
+        }
+
+    split_fraction = float(effective["split_fraction"])
+    split_index = min(max(int(len(timestamps) * split_fraction), 1),
+                      len(timestamps) - 1)
+    boundary = timestamps[split_index]
+    in_sample = segment(timestamps[0], boundary,
+                        equity_points[:split_index + 1], exposures[:split_index + 1])
+    out_of_sample = segment(boundary, None,
+                            equity_points[split_index:], exposures[split_index:])
+
     return {
         "status": "ok",
         "simulation": "portfolio-intraday-v1",
@@ -475,6 +552,9 @@ def simulate_portfolio(bars_by_symbol: dict[str, list[dict]], config: dict | Non
             "first_timestamp": timestamps[0].isoformat(),
             "last_timestamp": timestamps[-1].isoformat(),
         },
+        "split_fraction": split_fraction,
+        "in_sample": in_sample,
+        "out_of_sample": out_of_sample,
         "equity": {
             "starting": float(effective["starting_equity"]),
             "final": final_equity,
@@ -504,5 +584,8 @@ def simulate_portfolio(bars_by_symbol: dict[str, list[dict]], config: dict | Non
             "Costs are a per-side estimate covering spread, slippage, and fees.",
             "Only the intraday intraday pool is simulated; swing and core daily strategies are excluded.",
             "Universe membership is taken as fixed over the window; delisted or added symbols are not modelled.",
+            "The in-sample/out-of-sample split is one chronological cut of a "
+            "continuous simulation; out-of-sample equity starts at the boundary "
+            "value and open positions carry across.",
         ],
     }

@@ -143,6 +143,29 @@ class PortfolioSimulationTests(unittest.TestCase):
         expected = -(-len(breakout_path()) // 5)
         self.assertEqual(result["period"]["bars"], expected)
 
+    def test_split_reports_in_sample_and_out_of_sample_sections(self):
+        result = simulate_portfolio({"AAPL": bars_from(breakout_path())}, BASE)
+
+        self.assertEqual(result["split_fraction"], 0.7)
+        in_sample = result["in_sample"]
+        out_of_sample = result["out_of_sample"]
+        self.assertEqual(in_sample["trades"] + out_of_sample["trades"],
+                         result["metrics"]["closed_trades"])
+        self.assertAlmostEqual(in_sample["equity"]["final"],
+                               out_of_sample["equity"]["starting"])
+        self.assertIn("significance", in_sample)
+        self.assertIn("significance", out_of_sample)
+        self.assertIn("benchmark", in_sample)
+        self.assertIn("benchmark", out_of_sample)
+        self.assertEqual(in_sample["trades"], 1)
+        self.assertEqual(out_of_sample["trades"], 0)
+
+    def test_split_fraction_outside_the_supported_range_is_rejected(self):
+        for value in (0.4, 0.95):
+            with self.assertRaises(ValueError):
+                simulate_portfolio({"AAPL": bars_from(breakout_path())},
+                                   {**BASE, "split_fraction": value})
+
     def test_invalid_exit_style_is_rejected(self):
         with self.assertRaises(ValueError):
             simulate_portfolio({"AAPL": bars_from(breakout_path())},
@@ -192,6 +215,10 @@ class SignificanceTests(unittest.TestCase):
         small = minimum_detectable_edge([1.0, -1.0] * 10)
         large = minimum_detectable_edge([1.0, -1.0] * 100)
         self.assertGreater(small, large)
+
+    def test_tiny_samples_do_not_report_a_zero_width_interval(self):
+        summary = significance_summary([1.0, -1.0, 2.0, -2.0])
+        self.assertLess(summary["ci_low"], summary["ci_high"])
 
     def test_bootstrap_is_deterministic_and_reports_its_basis(self):
         values = [0.5, -0.2, 0.8, 0.1, -0.4, 0.3, 0.6, -0.1]
