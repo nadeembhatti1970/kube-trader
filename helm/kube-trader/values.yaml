@@ -1,7 +1,7 @@
 replicaCount: 1
 image:
   repository: kube-trader
-  tag: sha-240418841854f4a2be5a50d0132df9ca8931915b
+  tag: sha-0c80056dcc99c3d8f2c3b51b6290f1ada335cf98
   pullPolicy: IfNotPresent
 service:
   type: ClusterIP
