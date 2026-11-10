@@ -270,6 +270,7 @@ def research_portfolio(
     opening_range_minutes: int | None = Query(default=None, ge=1, le=120),
     gap_up_pct: float | None = Query(default=None, ge=0, le=0.2),
     starting_equity: float | None = Query(default=None, ge=1_000, le=100_000_000),
+    mandate: str | None = Query(default=None),
 ):
     """Portfolio-level walk-forward research over the selected watchlist.
 
@@ -277,6 +278,10 @@ def research_portfolio(
     symbol at once and reports the uncertainty around the result. Nothing here
     changes orders or settings.
     """
+    selected_mandate = (mandate or settings.validation_mandate).strip().lower()
+    if selected_mandate not in {"relative", "absolute"}:
+        raise HTTPException(
+            status_code=400, detail="mandate must be relative or absolute")
     selected_premise = (premise or "sma_crossover").strip().lower()
     if selected_premise not in {"sma_crossover", "opening_range_breakout", "gap_up"}:
         raise HTTPException(
@@ -351,6 +356,7 @@ def research_portfolio(
             "opening_range_minutes": (opening_range_minutes
                                       if opening_range_minutes is not None else 15),
             "gap_up_pct": gap_up_pct if gap_up_pct is not None else 0.005,
+            "mandate": selected_mandate,
         }
         result = simulate_portfolio(
             bars_by_symbol, config,
@@ -372,6 +378,7 @@ def research_portfolio(
             "premise": config["premise"],
             "opening_range_minutes": config["opening_range_minutes"],
             "gap_up_pct": config["gap_up_pct"],
+            "mandate": config["mandate"],
         })
         identity = validation_config_key(candidate)
         full_significance = result.get("significance", {})
@@ -379,13 +386,15 @@ def research_portfolio(
         oos_significance = out_of_sample.get("significance", {})
         oos_benchmark = out_of_sample.get("benchmark_relative")
         validated = validation_verdict(
-            oos_significance, settings.validation_min_trades, oos_benchmark)
+            oos_significance, settings.validation_min_trades, oos_benchmark,
+            mandate=selected_mandate)
         result["validation"] = {
             "config_hash": identity["key"],
             "config": identity["config"],
             "validated": validated,
             "basis": "out_of_sample",
-            "benchmark_relative_required": True,
+            "mandate": selected_mandate,
+            "benchmark_relative_required": selected_mandate == "relative",
             "scheme_version": identity["scheme_version"],
             "namespace": identity["namespace"],
             "minimum_trades": settings.validation_min_trades,
@@ -437,12 +446,17 @@ def research_daily_portfolio(
     regime_sma: int = Query(default=200, ge=20, le=300),
     regime_symbol: str = Query(default="SPY"),
     starting_equity: float | None = Query(default=None, ge=1_000, le=100_000_000),
+    mandate: str | None = Query(default=None),
 ):
     """Portfolio-level simulation of the daily swing and core pools.
 
     Runs both pools together under the live pool budgets, concentration caps,
     risk sizing, and costs. It never places orders or changes settings.
     """
+    selected_mandate = (mandate or settings.validation_mandate).strip().lower()
+    if selected_mandate not in {"relative", "absolute"}:
+        raise HTTPException(
+            status_code=400, detail="mandate must be relative or absolute")
     if symbols:
         requested = [item.strip().upper() for item in symbols.split(",") if item.strip()]
     else:
@@ -488,6 +502,7 @@ def research_daily_portfolio(
             split_fraction=(split_fraction if split_fraction is not None else 0.7),
             regime_filter_enabled=regime_filter,
             regime_sma=regime_sma,
+            mandate=selected_mandate,
         )
         result = simulate_daily_portfolio(
             bars_by_symbol, config,
@@ -501,7 +516,8 @@ def research_daily_portfolio(
         oos = oos_section.get("significance", {})
         oos_benchmark = oos_section.get("benchmark_relative")
         validated = validation_verdict(
-            oos, settings.validation_min_trades, oos_benchmark)
+            oos, settings.validation_min_trades, oos_benchmark,
+            mandate=selected_mandate)
         result["validation"] = {
             "config_hash": identity["key"],
             "config": identity["config"],
@@ -509,7 +525,8 @@ def research_daily_portfolio(
             "scheme_version": identity["scheme_version"],
             "validated": validated,
             "basis": "out_of_sample",
-            "benchmark_relative_required": True,
+            "mandate": selected_mandate,
+            "benchmark_relative_required": selected_mandate == "relative",
             "minimum_trades": settings.validation_min_trades,
             "required_by_execution": settings.require_validated_strategy,
             "note": (

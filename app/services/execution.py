@@ -120,6 +120,32 @@ def protection_model(pool: str | None, fractional: bool, stops: list[dict],
     }
 
 
+def capital_utilization(equity: float, cash: float, positions,
+                        allocations: dict) -> dict:
+    """Invested share of equity, cash share, and utilization of each pool target."""
+    value = float(equity)
+    invested = sum(abs(float(getattr(position, "market_value", 0) or 0))
+                   for position in positions)
+    pools = {}
+    for pool, item in allocations.items():
+        target = float(item.get("target_equity") or 0)
+        exposure = float(item.get("exposure") or 0)
+        pools[pool] = {
+            "exposure": exposure,
+            "target_equity": target,
+            "utilization_pct": exposure / target * 100 if target else None,
+            "remaining": item.get("remaining"),
+        }
+    return {
+        "equity": value,
+        "cash": float(cash),
+        "invested": invested,
+        "utilization_pct": invested / value * 100 if value else None,
+        "cash_pct": float(cash) / value * 100 if value else None,
+        "pools": pools,
+    }
+
+
 def order_tree(order):
     yield order
     for leg in getattr(order, "legs", None) or []:
@@ -632,6 +658,8 @@ def reconcile(client_api: TradingClient):
                "over_target": max(0.0, exposures[pool] - equity * weight)}
         for pool, weight in weights.items()
     }
+    utilization = capital_utilization(
+        equity, float(account.cash), positions, allocations)
     ledger_check = reconcile_open_quantities(
         build_realized_trade_report(managed_fills())["open_managed_quantities"],
         broker_positions,
@@ -690,6 +718,7 @@ def reconcile(client_api: TradingClient):
              "open_risk_pct": open_risk_pct,
              "max_portfolio_open_risk_pct": settings.max_portfolio_open_risk_pct,
              "protection_summary": dict(sorted(protected_models.items())),
+             "capital_utilization": utilization,
              "warnings": warnings,
              "allocations": allocations, "sector_exposures": sector_exposures}
     log_reconciliation_warnings(warnings)

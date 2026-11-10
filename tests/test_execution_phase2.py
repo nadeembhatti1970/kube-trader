@@ -166,6 +166,28 @@ class LimitFallbackTests(unittest.TestCase):
         self.assertEqual(result.id, "limit-1")
 
 
+class CapitalUtilizationTests(unittest.TestCase):
+    def test_reports_invested_cash_and_pool_use(self):
+        positions = [SimpleNamespace(market_value="20000")]
+        allocations = {
+            "core": {"exposure": 20000, "target_equity": 50000, "remaining": 30000},
+        }
+
+        result = execution.capital_utilization(
+            100_000.0, 60_000.0, positions, allocations)
+
+        self.assertEqual(result["invested"], 20000.0)
+        self.assertAlmostEqual(result["utilization_pct"], 20.0)
+        self.assertAlmostEqual(result["cash_pct"], 60.0)
+        self.assertAlmostEqual(result["pools"]["core"]["utilization_pct"], 40.0)
+
+    def test_empty_portfolio_is_zero_utilization(self):
+        result = execution.capital_utilization(100_000.0, 100_000.0, [], {})
+        self.assertEqual(result["invested"], 0.0)
+        self.assertAlmostEqual(result["utilization_pct"], 0.0)
+        self.assertAlmostEqual(result["cash_pct"], 100.0)
+
+
 class ReconcileWarningThrottleTests(unittest.TestCase):
     def setUp(self):
         execution.WARNING_LOG.clear()

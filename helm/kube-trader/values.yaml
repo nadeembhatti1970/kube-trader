@@ -46,7 +46,8 @@ config:
   signalFastBars: "5"
   signalSlowBars: "20"
   signalMinSpreadPct: "0.001"
-  signalMinBuyRsi: "55"
+  # Paper research candidate: the RSI 65 filter has the strongest out-of-sample edge.
+  signalMinBuyRsi: "65"
   swingAtrPeriod: "14"
   swingAtrMultiple: "2.0"
   coreStopLossPct: "0.20"
@@ -71,6 +72,7 @@ config:
   requireValidatedStrategy: "false"
   validationMinTrades: "30"
   validationConfidence: "0.95"
+  validationMandate: relative
   portfolioBacktestMaxSymbols: "40"
 persistence:
   enabled: true

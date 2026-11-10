@@ -44,6 +44,7 @@ data:
   REQUIRE_VALIDATED_STRATEGY: {{ .Values.config.requireValidatedStrategy | quote }}
   VALIDATION_MIN_TRADES: {{ .Values.config.validationMinTrades | quote }}
   VALIDATION_CONFIDENCE: {{ .Values.config.validationConfidence | quote }}
+  VALIDATION_MANDATE: {{ .Values.config.validationMandate | quote }}
   PORTFOLIO_BACKTEST_MAX_SYMBOLS: {{ .Values.config.portfolioBacktestMaxSymbols | quote }}
   DATABASE_PATH: /data/market.db
   ETF_HOLDINGS_SYMBOL: {{ .Values.config.etfHoldingsSymbol | quote }}

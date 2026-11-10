@@ -335,6 +335,25 @@ class SignificanceTests(unittest.TestCase):
         self.assertTrue(validation_verdict(
             strong, min_trades=10, benchmark_relative={"ci_above_zero": True}))
 
+    def test_absolute_mandate_ignores_the_benchmark_test(self):
+        strong = significance_summary([1.0, 1.1, 0.9, 1.2, 0.95] * 10)
+        benchmark = {"ci_above_zero": False}
+        self.assertFalse(validation_verdict(strong, 10, benchmark))
+        self.assertTrue(validation_verdict(
+            strong, 10, benchmark, mandate="absolute"))
+        self.assertFalse(validation_verdict(
+            significance_summary([1.0, -1.0] * 20), 10, None, mandate="absolute"))
+
+    def test_unknown_mandate_is_rejected(self):
+        with self.assertRaises(ValueError):
+            validation_verdict(significance_summary([1.0, 2.0]), 1, mandate="magic")
+
+    def test_mandate_changes_the_validation_key(self):
+        base = {"strategy": "sma-crossover-confirmed-v1", "signal_fast_bars": 5}
+        relative = validation_config_key(base)
+        absolute = validation_config_key({**base, "mandate": "absolute"})
+        self.assertNotEqual(relative["key"], absolute["key"])
+
     def test_config_key_ignores_unrelated_settings(self):
         base = {"strategy": "sma-crossover-confirmed-v1", "signal_fast_bars": 5,
                 "signal_slow_bars": 20, "signal_min_spread_pct": 0.001}

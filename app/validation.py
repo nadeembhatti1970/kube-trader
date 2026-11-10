@@ -19,12 +19,13 @@ VALIDATION_KEYS = (
     "entry_order_type", "entry_limit_offset_bps",
     "min_hold_minutes", "exit_confirmation_spread_pct", "exit_style",
     "trailing_stop_pct", "resample_minutes", "split_fraction",
-    "premise", "opening_range_minutes", "gap_up_pct",
+    "premise", "opening_range_minutes", "gap_up_pct", "mandate",
 )
 Z_SCORES = {0.90: 1.645, 0.95: 1.960, 0.99: 2.576}
 # Bump when the key set or the meaning of a validated verdict changes. The version
 # is part of the hash and is stored, so older records cannot satisfy a newer gate.
-VALIDATION_SCHEME_VERSION = 3
+VALIDATION_SCHEME_VERSION = 4
+MANDATES = ("relative", "absolute")
 # Live provenance records only execution settings, so simulator-only keys are
 # normalised here. Without this the live gate could never match a research verdict.
 SIMULATOR_DEFAULTS = {
@@ -37,6 +38,7 @@ SIMULATOR_DEFAULTS = {
     "premise": "sma_crossover",
     "opening_range_minutes": 15,
     "gap_up_pct": 0.005,
+    "mandate": "relative",
 }
 
 
@@ -154,14 +156,23 @@ def significance_summary(values: list[float], confidence: float = 0.95,
 
 
 def validation_verdict(significance: dict, min_trades: int,
-                       benchmark_relative: dict | None = None) -> bool:
-    """A configuration needs a positive trade edge and, when supplied, a positive
-    edge over the passive alternative at the same exposure."""
+                       benchmark_relative: dict | None = None,
+                       mandate: str = "relative") -> bool:
+    """Decide whether a configuration is validated under the chosen mandate.
+
+    relative: positive trade edge and a positive edge over the passive
+    alternative at the same exposure.
+    absolute: positive trade edge only.
+    """
+    if mandate not in MANDATES:
+        raise ValueError(f"mandate must be one of {MANDATES}")
     trade_edge = bool(
         significance
         and significance.get("n", 0) >= max(1, min_trades)
         and significance.get("ci_above_zero")
     )
+    if mandate == "absolute":
+        return trade_edge
     if benchmark_relative is None:
         return trade_edge
     return trade_edge and bool(benchmark_relative.get("ci_above_zero"))

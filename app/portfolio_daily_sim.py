@@ -43,7 +43,7 @@ POOL_WEIGHT_KEYS = {"swing": "swing_allocation_pct", "core": "core_allocation_pc
 
 def daily_config(settings, starting_equity: float, cost_bps: float | None = None,
                  split_fraction: float = 0.7, regime_filter_enabled: bool = False,
-                 regime_sma: int = 200) -> dict:
+                 regime_sma: int = 200, mandate: str = "relative") -> dict:
     """Build the daily simulation config from runtime settings."""
     return {
         "starting_equity": float(starting_equity),
@@ -65,6 +65,7 @@ def daily_config(settings, starting_equity: float, cost_bps: float | None = None
         "split_fraction": split_fraction,
         "regime_filter_enabled": regime_filter_enabled,
         "regime_sma": regime_sma,
+        "mandate": mandate,
     }
 
 
@@ -83,6 +84,7 @@ def daily_validation_params(config: dict) -> dict:
         "split_fraction": config["split_fraction"],
         "regime_filter_enabled": config["regime_filter_enabled"],
         "regime_sma": config["regime_sma"],
+        "mandate": config.get("mandate", "relative"),
     }
 
 

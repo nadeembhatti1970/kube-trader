@@ -91,6 +91,7 @@ def _candidate_config(config: dict) -> dict:
         "premise": config.get("premise", "sma_crossover"),
         "opening_range_minutes": config.get("opening_range_minutes", 15),
         "gap_up_pct": config.get("gap_up_pct", 0.005),
+        "mandate": config.get("mandate", "relative"),
     })
     return candidate
 
@@ -114,7 +115,8 @@ def run_grid(bars_by_symbol: dict[str, list[dict]], sectors: dict[str, str],
         mean = significance.get("mean")
         gross = mean + cost if mean is not None else None
         validated = validation_verdict(
-            significance, min_oos_trades, benchmark_relative)
+            significance, min_oos_trades, benchmark_relative,
+            mandate=config.get("mandate", "relative"))
         row = {
             "variant": variant,
             "label": variant_label(variant),
@@ -167,7 +169,7 @@ def build_daily_variants(regime_smas: list[int]) -> list[dict]:
 
 
 def _row_from_result(result: dict, label: str, variant: dict, cost: float,
-                     min_oos_trades: int) -> dict:
+                     min_oos_trades: int, mandate: str = "relative") -> dict:
     out_of_sample = result.get("out_of_sample") or {}
     significance = out_of_sample.get("significance") or {}
     metrics = out_of_sample.get("metrics") or {}
@@ -189,7 +191,7 @@ def _row_from_result(result: dict, label: str, variant: dict, cost: float,
         "oos_excess_pct": benchmark_relative.get("mean_excess_pct"),
         "oos_excess_ci_low": benchmark_relative.get("ci_low_pct"),
         "validated": validation_verdict(
-            significance, min_oos_trades, benchmark_relative),
+            significance, min_oos_trades, benchmark_relative, mandate=mandate),
         "result": result,
         "benchmark_relative": benchmark_relative,
     }
@@ -209,7 +211,8 @@ def run_daily_grid(bars_by_symbol: dict[str, list[dict]],
             validation={"confidence": confidence}, regime_bars=regime_bars)
         row = _row_from_result(
             result, str(variant.get("label", "daily")), variant,
-            cost, min_oos_trades)
+            cost, min_oos_trades,
+            mandate=base_config.get("mandate", "relative"))
         if persist:
             identity = config_key(
                 "daily-swing-core", daily_validation_params(config))
@@ -302,6 +305,9 @@ def main():
                         default=settings.validation_min_trades)
     parser.add_argument("--starting-equity", type=float, default=None,
                         help="Override the capital base; defaults to live account equity")
+    parser.add_argument("--mandate", choices=["relative", "absolute"],
+                        default=settings.validation_mandate,
+                        help="relative also requires a positive benchmark-relative edge")
     parser.add_argument("--persist", action="store_true",
                         help="Store each verdict in strategy_validation")
     args = parser.parse_args()
@@ -343,7 +349,7 @@ def main():
                 "backfill it first")
         base_config = daily_config(
             settings, starting_equity, cost_bps=args.cost_bps,
-            split_fraction=args.split_fraction)
+            split_fraction=args.split_fraction, mandate=args.mandate)
         variants = build_daily_variants(regime_smas)
         sectors = {symbol: sector_for_symbol(symbol, settings)
                    for symbol in bars_by_symbol}
@@ -379,6 +385,7 @@ def main():
             "intraday_entry_cutoff_minutes": settings.intraday_entry_cutoff_minutes,
             "intraday_flatten_minutes": settings.intraday_flatten_minutes,
             "split_fraction": args.split_fraction,
+            "mandate": args.mandate,
         }
         variants = build_variants(
             _floats(args.spreads), _floats(args.rsis),
@@ -398,9 +405,12 @@ def main():
 
     print_table(rows)
     promoted = [row for row in rows if row["validated"]]
-    print(f"\npromoted {len(promoted)} of {len(rows)} variants (out-of-sample trade "
-          f"CI above zero, at least {args.min_oos_trades} trades, and out-of-sample "
-          f"excess return over the same-exposure benchmark also above zero)")
+    mandate_note = ("and out-of-sample excess return over the same-exposure benchmark "
+                    "also above zero" if args.mandate == "relative"
+                    else "only; absolute mandate ignores the benchmark test")
+    print(f"\npromoted {len(promoted)} of {len(rows)} variants under the "
+          f"{args.mandate} mandate (out-of-sample trade CI above zero, at least "
+          f"{args.min_oos_trades} trades {mandate_note})")
     if promoted:
         print("strictly promote on out-of-sample evidence only; this is not a guarantee.")
 

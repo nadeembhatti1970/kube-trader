@@ -98,6 +98,19 @@ class RunGridTests(unittest.TestCase):
 
         self.assertFalse(rows[0]["validated"])
 
+    def test_absolute_mandate_promotes_on_the_trade_edge_alone(self):
+        fake = fake_result(0.25, 60, 0.10, 0.40, excess_above_zero=False)
+        with patch.object(research_grid, "simulate_portfolio", return_value=fake):
+            absolute = research_grid.run_grid(
+                {"AAPL": []}, {}, {**BASE, "mandate": "absolute"},
+                self.variants()[:1], min_oos_trades=30)
+            relative = research_grid.run_grid(
+                {"AAPL": []}, {}, {**BASE, "mandate": "relative"},
+                self.variants()[:1], min_oos_trades=30)
+
+        self.assertTrue(absolute[0]["validated"])
+        self.assertFalse(relative[0]["validated"])
+
     def test_missing_benchmark_edge_blocks_promotion(self):
         with patch.object(research_grid, "simulate_portfolio",
                           return_value=fake_result(0.25, 60, 0.10, 0.40,

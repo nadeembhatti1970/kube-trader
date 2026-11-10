@@ -75,6 +75,7 @@ class Settings(BaseSettings):
     require_validated_strategy: bool = False
     validation_min_trades: int = 30
     validation_confidence: float = 0.95
+    validation_mandate: str = "relative"
     portfolio_backtest_max_symbols: int = 40
     alert_webhook_url: str = ""
     log_level: str = "INFO"
@@ -121,6 +122,7 @@ def strategy_config(settings: Settings | None = None, event: dict | None = None)
         "entry_limit_offset_bps": current.entry_limit_offset_bps,
         "fractional_shares_enabled": current.fractional_shares_enabled,
         "fractional_qty_decimals": current.fractional_qty_decimals,
+        "mandate": current.validation_mandate,
         "risk_controls": {
             "configured_max_trade_risk_pct": current.max_trade_risk_pct,
             "effective_max_trade_risk_pct": min(current.max_trade_risk_pct, 0.01),
