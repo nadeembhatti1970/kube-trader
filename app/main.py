@@ -8,16 +8,17 @@ from app.database import (account_fee_activities, broker_activity_summary,
                           broker_activity_sync_status, connect, extended_hours_report,
                           get_risk_state, latest_account_snapshot, latest_backtest,
                           latest_broker_activities, latest_universe_snapshot, managed_fills,
-                          minute_bar_coverage, recent_bars, save_position_assignment,
-                          save_strategy_validation)
+                          minute_bar_coverage, recent_bars, recent_daily_bars,
+                          save_position_assignment, save_strategy_validation)
 from app.export_names import export_filename
+from app.portfolio_daily_sim import simulate_daily_portfolio
 from app.portfolio_sim import simulate_portfolio
 from app.research import evaluate_ohlc_walk_forward
 from app.settings import get_settings, strategy_config
 from app.storage import store_bars
 from app.trade_accounting import build_realized_trade_report, reconcile_open_quantities
 from app.universe import sector_for_symbol
-from app.validation import validation_config_key, validation_verdict
+from app.validation import config_key, validation_config_key, validation_verdict
 
 settings = get_settings()
 app = FastAPI(title="Kube Trader", version=settings.app_version)
@@ -264,6 +265,9 @@ def research_portfolio(
     trailing_stop_pct: float | None = Query(default=None, ge=0, le=1),
     resample_minutes: int | None = Query(default=None, ge=1, le=60),
     split_fraction: float | None = Query(default=None, ge=0.5, le=0.9),
+    premise: str | None = Query(default=None),
+    opening_range_minutes: int | None = Query(default=None, ge=1, le=120),
+    gap_up_pct: float | None = Query(default=None, ge=0, le=0.2),
 ):
     """Portfolio-level walk-forward research over the selected watchlist.
 
@@ -271,6 +275,11 @@ def research_portfolio(
     symbol at once and reports the uncertainty around the result. Nothing here
     changes orders or settings.
     """
+    selected_premise = (premise or "sma_crossover").strip().lower()
+    if selected_premise not in {"sma_crossover", "opening_range_breakout", "gap_up"}:
+        raise HTTPException(
+            status_code=400,
+            detail="premise must be sma_crossover, opening_range_breakout, or gap_up")
     selected_exit_style = (exit_style or "signal").strip().lower()
     if selected_exit_style not in {"signal", "protective_only", "trailing"}:
         raise HTTPException(
@@ -327,6 +336,10 @@ def research_portfolio(
             "trailing_stop_pct": trailing_stop_pct or 0.0,
             "resample_minutes": resample_minutes or 1,
             "split_fraction": split_fraction if split_fraction is not None else 0.7,
+            "premise": selected_premise,
+            "opening_range_minutes": (opening_range_minutes
+                                      if opening_range_minutes is not None else 15),
+            "gap_up_pct": gap_up_pct if gap_up_pct is not None else 0.005,
         }
         result = simulate_portfolio(
             bars_by_symbol, config,
@@ -345,6 +358,9 @@ def research_portfolio(
             "trailing_stop_pct": config["trailing_stop_pct"],
             "resample_minutes": config["resample_minutes"],
             "split_fraction": config["split_fraction"],
+            "premise": config["premise"],
+            "opening_range_minutes": config["opening_range_minutes"],
+            "gap_up_pct": config["gap_up_pct"],
         })
         identity = validation_config_key(candidate)
         full_significance = result.get("significance", {})
@@ -355,6 +371,8 @@ def research_portfolio(
             "config": identity["config"],
             "validated": validated,
             "basis": "out_of_sample",
+            "scheme_version": identity["scheme_version"],
+            "namespace": identity["namespace"],
             "minimum_trades": settings.validation_min_trades,
             "required_by_execution": settings.require_validated_strategy,
             "note": (
@@ -379,6 +397,7 @@ def research_portfolio(
                     "benchmark": result.get("benchmark"),
                     "config": config,
                 },
+                scheme_version=identity["scheme_version"],
             )
         result["persisted"] = bool(persist)
         return result
@@ -387,6 +406,115 @@ def research_portfolio(
     except Exception as exc:
         raise HTTPException(
             status_code=503, detail=f"Portfolio research unavailable: {exc}") from exc
+
+
+@app.get("/research/portfolio/daily")
+def research_daily_portfolio(
+    days: int = Query(default=400, ge=220, le=2520),
+    symbols: str | None = Query(default=None),
+    cost_bps: float | None = Query(default=None, ge=0, le=100),
+    split_fraction: float | None = Query(default=None, ge=0.5, le=0.9),
+    persist: bool = Query(default=False),
+):
+    """Portfolio-level simulation of the daily swing and core pools.
+
+    Runs both pools together under the live pool budgets, concentration caps,
+    risk sizing, and costs. It never places orders or changes settings.
+    """
+    if symbols:
+        requested = [item.strip().upper() for item in symbols.split(",") if item.strip()]
+    else:
+        requested = [row["symbol"] for row in latest_universe_snapshot()
+                     if row.get("selected")]
+    requested = requested[:settings.portfolio_backtest_max_symbols]
+    if not requested:
+        raise HTTPException(status_code=404,
+                            detail="No symbols selected; pass ?symbols= or run the universe screen")
+    try:
+        bars_by_symbol = {}
+        for symbol in requested:
+            rows = recent_daily_bars(symbol, days)
+            if len(rows) >= 220:
+                bars_by_symbol[symbol] = rows
+        if not bars_by_symbol:
+            raise HTTPException(
+                status_code=404,
+                detail="No stored daily bars; run the backfill with --timeframe day")
+        snapshot = latest_account_snapshot()
+        config = {
+            "starting_equity": float(snapshot["equity"]) if snapshot else 100_000.0,
+            "swing_allocation_pct": settings.swing_allocation_pct,
+            "core_allocation_pct": settings.core_allocation_pct,
+            "swing_sma": 20,
+            "swing_atr_period": settings.swing_atr_period,
+            "swing_atr_multiple": settings.swing_atr_multiple,
+            "core_fast": 50,
+            "core_slow": 200,
+            "core_stop_loss_pct": settings.core_stop_loss_pct,
+            "max_trade_risk_pct": min(settings.max_trade_risk_pct, 0.01),
+            "max_portfolio_open_risk_pct": 0.05,
+            "max_symbol_exposure_pct": settings.max_symbol_exposure_pct,
+            "max_sector_exposure_pct": settings.max_sector_exposure_pct,
+            "max_open_positions": settings.max_open_positions,
+            "cost_bps_per_side": (settings.backtest_cost_bps
+                                  if cost_bps is None else cost_bps),
+            "split_fraction": split_fraction if split_fraction is not None else 0.7,
+        }
+        result = simulate_daily_portfolio(
+            bars_by_symbol, config,
+            sectors={symbol: sector_for_symbol(symbol, settings)
+                     for symbol in bars_by_symbol},
+            validation={"confidence": settings.validation_confidence},
+        )
+        identity = config_key("daily-swing-core", {
+            "swing_sma": config["swing_sma"],
+            "swing_atr_period": config["swing_atr_period"],
+            "swing_atr_multiple": config["swing_atr_multiple"],
+            "core_fast": config["core_fast"],
+            "core_slow": config["core_slow"],
+            "core_stop_loss_pct": config["core_stop_loss_pct"],
+            "cost_bps_per_side": config["cost_bps_per_side"],
+            "split_fraction": config["split_fraction"],
+        })
+        oos = (result.get("out_of_sample") or {}).get("significance", {})
+        validated = validation_verdict(oos, settings.validation_min_trades)
+        result["validation"] = {
+            "config_hash": identity["key"],
+            "config": identity["config"],
+            "namespace": identity["namespace"],
+            "scheme_version": identity["scheme_version"],
+            "validated": validated,
+            "basis": "out_of_sample",
+            "minimum_trades": settings.validation_min_trades,
+            "required_by_execution": settings.require_validated_strategy,
+            "note": (
+                "Validated means the out-of-sample bootstrap interval for the mean net "
+                "trade return is entirely above zero and the out-of-sample sample meets "
+                "the minimum trade count. It is not a guarantee of future returns."
+            ),
+        }
+        if persist:
+            save_strategy_validation(
+                identity["key"], "daily-swing-core-v1", identity["config"],
+                int(oos.get("n") or 0), oos.get("mean"),
+                oos.get("ci_low"), oos.get("ci_high"), validated,
+                {
+                    "basis": "out_of_sample",
+                    "config": config,
+                    "in_sample": result.get("in_sample"),
+                    "out_of_sample": result.get("out_of_sample"),
+                    "metrics": result.get("metrics"),
+                    "period": result.get("period"),
+                },
+                scheme_version=identity["scheme_version"],
+            )
+        result["persisted"] = bool(persist)
+        return result
+    except HTTPException:
+        raise
+    except Exception as exc:
+        raise HTTPException(
+            status_code=503, detail=f"Daily portfolio research unavailable: {exc}") from exc
 
 
 @app.get("/account/reconciliation")

@@ -19,8 +19,12 @@ VALIDATION_KEYS = (
     "entry_order_type", "entry_limit_offset_bps",
     "min_hold_minutes", "exit_confirmation_spread_pct", "exit_style",
     "trailing_stop_pct", "resample_minutes", "split_fraction",
+    "premise", "opening_range_minutes", "gap_up_pct",
 )
 Z_SCORES = {0.90: 1.645, 0.95: 1.960, 0.99: 2.576}
+# Bump when the key set or the meaning of a validated verdict changes. The version
+# is part of the hash and is stored, so older records cannot satisfy a newer gate.
+VALIDATION_SCHEME_VERSION = 2
 # Live provenance records only execution settings, so simulator-only keys are
 # normalised here. Without this the live gate could never match a research verdict.
 SIMULATOR_DEFAULTS = {
@@ -30,17 +34,38 @@ SIMULATOR_DEFAULTS = {
     "trailing_stop_pct": 0.0,
     "resample_minutes": 1,
     "split_fraction": 0.7,
+    "premise": "sma_crossover",
+    "opening_range_minutes": 15,
+    "gap_up_pct": 0.005,
 }
 
 
-def validation_config_key(config: dict) -> dict:
-    """Canonical key for the strategy parameters that define an edge."""
+def config_key(namespace: str, params: dict,
+               scheme_version: int | None = None) -> dict:
+    """Canonical, versioned key for a research verdict within one namespace."""
+    version = (VALIDATION_SCHEME_VERSION if scheme_version is None
+               else scheme_version)
+    payload = {
+        "scheme_version": version,
+        "namespace": namespace,
+        "params": params,
+    }
+    digest = hashlib.sha256(
+        json.dumps(payload, sort_keys=True, default=str).encode()
+    ).hexdigest()
+    return {
+        "key": digest,
+        "config": params,
+        "namespace": namespace,
+        "scheme_version": version,
+    }
+
+
+def validation_config_key(config: dict, scheme_version: int | None = None) -> dict:
+    """Canonical key for the intraday strategy parameters that define an edge."""
     effective = {**SIMULATOR_DEFAULTS, **(config or {})}
     selected = {key: effective.get(key) for key in VALIDATION_KEYS}
-    digest = hashlib.sha256(
-        json.dumps(selected, sort_keys=True, default=str).encode()
-    ).hexdigest()
-    return {"key": digest, "config": selected}
+    return config_key("intraday", selected, scheme_version)
 
 
 def _percentile(ordered: list[float], fraction: float) -> float:

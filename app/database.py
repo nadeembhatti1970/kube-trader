@@ -5,6 +5,7 @@ import psycopg
 from psycopg.rows import dict_row
 
 from app.settings import get_settings
+from app.validation import VALIDATION_SCHEME_VERSION
 
 
 def connect():
@@ -42,8 +43,19 @@ def init_db():
               out_of_sample_trades INTEGER NOT NULL,
               mean_net_return_pct DOUBLE PRECISION,
               ci_low DOUBLE PRECISION, ci_high DOUBLE PRECISION,
-              validated BOOLEAN NOT NULL, report JSONB NOT NULL
+              validated BOOLEAN NOT NULL, report JSONB NOT NULL,
+              scheme_version INTEGER NOT NULL DEFAULT 1
             );
+            ALTER TABLE strategy_validation ADD COLUMN IF NOT EXISTS
+              scheme_version INTEGER NOT NULL DEFAULT 1;
+            CREATE TABLE IF NOT EXISTS daily_bars (
+              symbol TEXT NOT NULL, day DATE NOT NULL,
+              open DOUBLE PRECISION NOT NULL, high DOUBLE PRECISION NOT NULL,
+              low DOUBLE PRECISION NOT NULL, close DOUBLE PRECISION NOT NULL,
+              volume BIGINT NOT NULL, PRIMARY KEY (symbol, day)
+            );
+            CREATE INDEX IF NOT EXISTS daily_bars_symbol_day
+              ON daily_bars(symbol, day DESC);
             CREATE TABLE IF NOT EXISTS position_assignments (
               symbol TEXT PRIMARY KEY, pool TEXT NOT NULL, note TEXT,
               assigned_at TIMESTAMPTZ NOT NULL DEFAULT now()
@@ -170,6 +182,45 @@ def save_bars(bars: list[dict], batch_size: int = 5000) -> int:
             """, chunk)
             saved += len(chunk)
     return saved
+
+
+def save_daily_bars(bars: list[dict], batch_size: int = 5000) -> int:
+    """Bulk insert/update daily bars used by the swing and core research simulator."""
+    if not bars:
+        return 0
+    if batch_size < 1:
+        raise ValueError("batch_size must be at least 1")
+    saved = 0
+    with connect() as db:
+        cursor = db.cursor()
+        for start in range(0, len(bars), batch_size):
+            chunk = bars[start:start + batch_size]
+            cursor.executemany("""
+                INSERT INTO daily_bars(symbol, day, open, high, low, close, volume)
+                VALUES (%(symbol)s, %(day)s, %(open)s, %(high)s, %(low)s,
+                        %(close)s, %(volume)s)
+                ON CONFLICT(symbol, day) DO UPDATE SET
+                  open=excluded.open, high=excluded.high, low=excluded.low,
+                  close=excluded.close, volume=excluded.volume
+            """, chunk)
+            saved += len(chunk)
+    return saved
+
+
+def recent_daily_bars(symbol: str, limit: int) -> list[dict]:
+    with connect() as db:
+        rows = db.execute("""
+          SELECT day, open, high, low, close, volume FROM daily_bars
+          WHERE symbol=%s ORDER BY day DESC LIMIT %s
+        """, (symbol, limit)).fetchall()
+    return [{
+        "time": row["day"].isoformat(),
+        "open": float(row["open"]),
+        "high": float(row["high"]),
+        "low": float(row["low"]),
+        "close": float(row["close"]),
+        "volume": int(row["volume"]),
+    } for row in reversed(rows)]
 
 
 def recent_closes(symbol: str, limit: int) -> list[dict]:
@@ -829,28 +880,34 @@ def save_strategy_validation(config_hash: str, strategy: str, config: dict,
                              out_of_sample_trades: int,
                              mean_net_return_pct: float | None,
                              ci_low: float | None, ci_high: float | None,
-                             validated: bool, report: dict):
+                             validated: bool, report: dict,
+                             scheme_version: int = VALIDATION_SCHEME_VERSION):
     with connect() as db:
         db.execute("""
           INSERT INTO strategy_validation(
             config_hash, strategy, config, out_of_sample_trades, mean_net_return_pct,
-            ci_low, ci_high, validated, report
-          ) VALUES (%s, %s, %s::jsonb, %s, %s, %s, %s, %s, %s::jsonb)
+            ci_low, ci_high, validated, report, scheme_version
+          ) VALUES (%s, %s, %s::jsonb, %s, %s, %s, %s, %s, %s::jsonb, %s)
           ON CONFLICT(config_hash) DO UPDATE SET
             strategy=excluded.strategy, config=excluded.config, evaluated_at=now(),
             out_of_sample_trades=excluded.out_of_sample_trades,
             mean_net_return_pct=excluded.mean_net_return_pct,
             ci_low=excluded.ci_low, ci_high=excluded.ci_high,
-            validated=excluded.validated, report=excluded.report
+            validated=excluded.validated, report=excluded.report,
+            scheme_version=excluded.scheme_version
         """, (config_hash, strategy, json.dumps(config), out_of_sample_trades,
-              mean_net_return_pct, ci_low, ci_high, validated, json.dumps(report)))
+              mean_net_return_pct, ci_low, ci_high, validated, json.dumps(report),
+              scheme_version))
 
 
-def latest_strategy_validation(config_hash: str):
+def latest_strategy_validation(config_hash: str,
+                               scheme_version: int = VALIDATION_SCHEME_VERSION):
+    """Only a record from the current validation scheme can satisfy a gate."""
     with connect() as db:
         return db.execute("""
-          SELECT * FROM strategy_validation WHERE config_hash=%s
-        """, (config_hash,)).fetchone()
+          SELECT * FROM strategy_validation
+          WHERE config_hash=%s AND scheme_version=%s
+        """, (config_hash, scheme_version)).fetchone()
 
 
 def latest_account_snapshot():

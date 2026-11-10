@@ -46,6 +46,11 @@ DEFAULT_CONFIG = {
     "trailing_stop_pct": 0.0,
     # Aggregate minute bars into N-minute bars before evaluating signals.
     "resample_minutes": 1,
+    # sma_crossover: 5/20 state changes; opening_range_breakout: first break of the
+    # session's opening range; gap_up: long a session opening above the prior close.
+    "premise": "sma_crossover",
+    "opening_range_minutes": 15,
+    "gap_up_pct": 0.005,
     # Chronological in-sample share of the window; the remainder is out-of-sample.
     "split_fraction": 0.7,
 }
@@ -146,9 +151,50 @@ def _prepare(bars: list[dict], config: dict) -> dict:
             window = closes[max(0, index - int(config["slow_bars"]) + 1):index + 1]
             confirmed[index] = (spread >= float(config["min_spread_pct"])
                                 and rsi(window) >= float(config["min_buy_rsi"]))
+    premise = str(config["premise"])
+    orb_entry = [False] * len(bars)
+    orb_stops: dict[int, float] = {}
+    if premise == "opening_range_breakout":
+        window = int(config["opening_range_minutes"])
+        highs: dict[int, float] = {}
+        lows: dict[int, float] = {}
+        for bar in bars:
+            local = bar["ts"].astimezone(NY)
+            elapsed = (local.hour * 60 + local.minute) - (9 * 60 + 30)
+            if elapsed < 0 or elapsed >= window:
+                continue
+            day = local.toordinal()
+            highs[day] = max(highs.get(day, bar["high"]), bar["high"])
+            lows[day] = min(lows.get(day, bar["low"]), bar["low"])
+        broken: set[int] = set()
+        for index, bar in enumerate(bars):
+            local = bar["ts"].astimezone(NY)
+            elapsed = (local.hour * 60 + local.minute) - (9 * 60 + 30)
+            day = local.toordinal()
+            if elapsed < window or day in broken or day not in highs:
+                continue
+            if bar["close"] > highs[day]:
+                orb_entry[index] = True
+                orb_stops[index] = lows[day]
+                broken.add(day)
+    gap_entry = [False] * len(bars)
+    if premise == "gap_up":
+        threshold = float(config["gap_up_pct"])
+        previous_close = None
+        current_day = None
+        for index, bar in enumerate(bars):
+            day = bar["ts"].astimezone(NY).toordinal()
+            if day != current_day:
+                if (previous_close
+                        and bar["open"] / previous_close - 1.0 >= threshold):
+                    gap_entry[index] = True
+                current_day = day
+            previous_close = bar["close"]
     index_by_ts = {bar["ts"]: index for index, bar in enumerate(bars)}
     return {"bars": bars, "above": above, "confirmed": confirmed,
-            "fast": fast, "slow": slow, "index": index_by_ts}
+            "fast": fast, "slow": slow, "index": index_by_ts,
+            "orb_entry": orb_entry, "orb_stops": orb_stops,
+            "gap_entry": gap_entry}
 
 
 def _exit_confirmed(frame: dict, index: int, spread_pct: float) -> bool:
@@ -237,6 +283,11 @@ def simulate_portfolio(bars_by_symbol: dict[str, list[dict]], config: dict | Non
         raise ValueError("trailing_stop_pct cannot be negative")
     if exit_style == "trailing" and float(effective["trailing_stop_pct"]) <= 0:
         raise ValueError("trailing exit_style requires trailing_stop_pct > 0")
+    premise = str(effective["premise"])
+    if premise not in {"sma_crossover", "opening_range_breakout", "gap_up"}:
+        raise ValueError("premise must be sma_crossover, opening_range_breakout, or gap_up")
+    if premise == "opening_range_breakout" and int(effective["opening_range_minutes"]) < 1:
+        raise ValueError("opening_range_minutes must be at least 1")
     if int(effective["resample_minutes"]) < 1:
         raise ValueError("resample_minutes must be at least 1")
     if not 0.5 <= float(effective["split_fraction"]) <= 0.9:
@@ -256,6 +307,7 @@ def simulate_portfolio(bars_by_symbol: dict[str, list[dict]], config: dict | Non
     cash = float(effective["starting_equity"])
     positions: dict[str, dict] = {}
     pending: dict[str, str] = {}
+    pending_stops: dict[str, float] = {}
     last_close: dict[str, float] = {}
     equity_points: list[tuple[datetime, float]] = []
     exposures: list[float] = []
@@ -369,6 +421,7 @@ def simulate_portfolio(bars_by_symbol: dict[str, list[dict]], config: dict | Non
             if pending.get(symbol) != "buy":
                 continue
             pending.pop(symbol, None)
+            event_stop = pending_stops.pop(symbol, None)
             if symbol in positions:
                 continue
             bar = frame["bars"][index]
@@ -386,6 +439,10 @@ def simulate_portfolio(bars_by_symbol: dict[str, list[dict]], config: dict | Non
                 continue
             equity = cash + position_value()
             stop_pct = float(effective["stop_loss_pct"])
+            if event_stop is not None and price > event_stop:
+                # Opening-range breakouts stop at the range low, but never wider
+                # than the configured stop distance.
+                stop_pct = min(max((price - event_stop) / price, 0.003), stop_pct)
             target_pct = max(float(effective["take_profit_pct"]), stop_pct * 2.0)
             per_share_risk = max(price * stop_pct, 0.01)
             risk_budget = equity * float(effective["max_trade_risk_pct"])
@@ -434,6 +491,15 @@ def simulate_portfolio(bars_by_symbol: dict[str, list[dict]], config: dict | Non
         for symbol, frame, index in active:
             bar = frame["bars"][index]
             last_close[symbol] = bar["close"]
+            if premise == "opening_range_breakout":
+                if frame["orb_entry"][index] and symbol not in positions:
+                    pending[symbol] = "buy"
+                    pending_stops[symbol] = frame["orb_stops"][index]
+                continue
+            if premise == "gap_up":
+                if frame["gap_entry"][index] and symbol not in positions:
+                    pending[symbol] = "buy"
+                continue
             above = frame["above"][index]
             if above is None:
                 continue

@@ -21,6 +21,23 @@ def rising_bars(count=90, start=datetime(2026, 11, 6, 14, 30, tzinfo=timezone.ut
     return bars
 
 
+def daily_rising_bars(count=260, start=datetime(2025, 1, 1, tzinfo=timezone.utc)):
+    bars = []
+    moment = start
+    for index in range(count):
+        close = 100.0 + index * 0.2
+        bars.append({
+            "time": moment.date().isoformat(),
+            "open": close,
+            "high": close * 1.005,
+            "low": close * 0.995,
+            "close": close,
+            "volume": 1000,
+        })
+        moment += timedelta(days=1)
+    return bars
+
+
 class PortfolioResearchEndpointTests(unittest.TestCase):
     def setUp(self):
         self.client = TestClient(main.app)
@@ -136,6 +153,47 @@ class PortfolioResearchEndpointTests(unittest.TestCase):
         response = self.client.get(
             "/research/portfolio", params={"split_fraction": 0.95})
         self.assertEqual(response.status_code, 422)
+
+    def test_premise_override_reaches_the_simulation(self):
+        with patch.object(main, "latest_universe_snapshot",
+                          return_value=[{"symbol": "AAPL", "selected": True}]), \
+                patch.object(main, "recent_bars", return_value=rising_bars()), \
+                patch.object(main, "latest_account_snapshot",
+                             return_value={"equity": 100_000.0}):
+            response = self.client.get(
+                "/research/portfolio", params={"days": 500, "premise": "gap_up"})
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.json()["config"]["premise"], "gap_up")
+
+    def test_invalid_premise_returns_bad_request(self):
+        response = self.client.get(
+            "/research/portfolio", params={"premise": "magic"})
+        self.assertEqual(response.status_code, 400)
+
+    def test_daily_endpoint_runs_the_swing_and_core_pools(self):
+        with patch.object(main, "latest_universe_snapshot",
+                          return_value=[{"symbol": "AAPL", "selected": True}]), \
+                patch.object(main, "recent_daily_bars", return_value=daily_rising_bars()), \
+                patch.object(main, "latest_account_snapshot",
+                             return_value={"equity": 100_000.0}):
+            response = self.client.get(
+                "/research/portfolio/daily", params={"days": 260})
+
+        self.assertEqual(response.status_code, 200)
+        body = response.json()
+        self.assertEqual(body["status"], "ok")
+        self.assertIn("out_of_sample", body)
+        self.assertEqual(body["validation"]["namespace"], "daily-swing-core")
+        self.assertFalse(body["validation"]["validated"])
+
+    def test_daily_endpoint_requires_daily_bars(self):
+        with patch.object(main, "latest_universe_snapshot",
+                          return_value=[{"symbol": "AAPL", "selected": True}]), \
+                patch.object(main, "recent_daily_bars", return_value=[]):
+            response = self.client.get("/research/portfolio/daily")
+
+        self.assertEqual(response.status_code, 404)
 
     def test_invalid_exit_style_returns_bad_request(self):
         response = self.client.get(

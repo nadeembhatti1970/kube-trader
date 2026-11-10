@@ -166,6 +166,48 @@ class PortfolioSimulationTests(unittest.TestCase):
                 simulate_portfolio({"AAPL": bars_from(breakout_path())},
                                    {**BASE, "split_fraction": value})
 
+    def test_opening_range_breakout_enters_after_the_range(self):
+        window = [100.5] * 15
+        after = [101.5 + 0.01 * index for index in range(366)]
+        result = simulate_portfolio(
+            {"AAPL": bars_from(window + after)},
+            {"intraday_entry_start_minutes": 0, "intraday_entry_cutoff_minutes": 0,
+             "intraday_flatten_minutes": 10, "take_profit_pct": 0.5,
+             "stop_loss_pct": 0.2, "cost_bps_per_side": 0.0,
+             "premise": "opening_range_breakout", "opening_range_minutes": 15},
+        )
+
+        self.assertEqual(len(result["trades"]), 1)
+        trade = result["trades"][0]
+        self.assertEqual(trade["exit_reason"], "eod_flatten")
+        entry_hour = datetime.fromisoformat(trade["entry_ts"]).astimezone(
+            timezone(timedelta(hours=-5)))
+        self.assertGreaterEqual(entry_hour.hour * 60 + entry_hour.minute, 9 * 60 + 45)
+
+    def test_gap_up_enters_on_the_opening_gap(self):
+        day_one = bars_from([100.0] * 20, start=datetime(
+            2026, 11, 6, 14, 30, tzinfo=timezone.utc))
+        day_two = bars_from([101.5 + 0.01 * index for index in range(381)],
+                            start=datetime(2026, 11, 9, 14, 30, tzinfo=timezone.utc))
+        day_two[0]["open"] = 101.0  # 1% above the prior close
+        result = simulate_portfolio(
+            {"AAPL": day_one + day_two},
+            {"intraday_entry_start_minutes": 0, "intraday_entry_cutoff_minutes": 0,
+             "intraday_flatten_minutes": 10, "take_profit_pct": 0.5,
+             "stop_loss_pct": 0.2, "cost_bps_per_side": 0.0,
+             "premise": "gap_up", "gap_up_pct": 0.005},
+        )
+
+        self.assertEqual(len(result["trades"]), 1)
+        trade = result["trades"][0]
+        self.assertEqual(trade["exit_reason"], "eod_flatten")
+        self.assertTrue(trade["entry_ts"].startswith("2026-11-09"))
+
+    def test_invalid_premise_is_rejected(self):
+        with self.assertRaises(ValueError):
+            simulate_portfolio({"AAPL": bars_from(breakout_path())},
+                               {**BASE, "premise": "magic"})
+
     def test_invalid_exit_style_is_rejected(self):
         with self.assertRaises(ValueError):
             simulate_portfolio({"AAPL": bars_from(breakout_path())},

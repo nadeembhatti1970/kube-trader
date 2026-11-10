@@ -31,6 +31,22 @@ class VariantTests(unittest.TestCase):
         self.assertEqual(variants[0]["fast_bars"], 5)
         self.assertEqual(variants[-1]["exit_style"], "trailing")
 
+    def test_premises_expand_the_matrix(self):
+        variants = research_grid.build_variants(
+            [0.001], [55.0], [(5, 20)], ["signal"],
+            ["sma_crossover", "opening_range_breakout", "gap_up"])
+        self.assertEqual(len(variants), 3)
+        self.assertEqual([item["premise"] for item in variants],
+                         ["sma_crossover", "opening_range_breakout", "gap_up"])
+
+    def test_label_carries_the_premise(self):
+        label = research_grid.variant_label({
+            "fast_bars": 5, "slow_bars": 20, "min_spread_pct": 0.001,
+            "min_buy_rsi": 55.0, "exit_style": "signal",
+            "premise": "opening_range_breakout",
+        })
+        self.assertTrue(label.startswith("opening_range_breakout|"))
+
     def test_label_carries_the_distinguishing_parameters(self):
         label = research_grid.variant_label({
             "fast_bars": 5, "slow_bars": 20, "min_spread_pct": 0.0015,

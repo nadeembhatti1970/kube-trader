@@ -46,25 +46,30 @@ def _fast_slows(value: str) -> list[tuple[int, int]]:
 
 def build_variants(spreads: list[float], rsis: list[float],
                    fast_slows: list[tuple[int, int]],
-                   exit_styles: list[str]) -> list[dict]:
+                   exit_styles: list[str],
+                   premises: list[str] | None = None) -> list[dict]:
     variants = []
-    for spread in spreads:
-        for rsi in rsis:
-            for fast, slow in fast_slows:
-                for style in exit_styles:
-                    variants.append({
-                        "min_spread_pct": spread,
-                        "min_buy_rsi": rsi,
-                        "fast_bars": fast,
-                        "slow_bars": slow,
-                        "exit_style": style,
-                    })
+    for premise in premises or ["sma_crossover"]:
+        for spread in spreads:
+            for rsi in rsis:
+                for fast, slow in fast_slows:
+                    for style in exit_styles:
+                        variants.append({
+                            "min_spread_pct": spread,
+                            "min_buy_rsi": rsi,
+                            "fast_bars": fast,
+                            "slow_bars": slow,
+                            "exit_style": style,
+                            "premise": premise,
+                        })
     return variants
 
 
 def variant_label(variant: dict) -> str:
     suffix = "" if variant["exit_style"] == "signal" else f"|{variant['exit_style']}"
-    return (f"{variant['fast_bars']}/{variant['slow_bars']} "
+    premise = variant.get("premise", "sma_crossover")
+    prefix = "" if premise == "sma_crossover" else f"{premise}|"
+    return (f"{prefix}{variant['fast_bars']}/{variant['slow_bars']} "
             f"s{variant['min_spread_pct']:g} r{variant['min_buy_rsi']:g}{suffix}")
 
 
@@ -81,6 +86,9 @@ def _candidate_config(config: dict) -> dict:
         "exit_confirmation_spread_pct": config.get("exit_confirmation_spread_pct", 0.0),
         "resample_minutes": config.get("resample_minutes", 1),
         "split_fraction": config.get("split_fraction", 0.7),
+        "premise": config.get("premise", "sma_crossover"),
+        "opening_range_minutes": config.get("opening_range_minutes", 15),
+        "gap_up_pct": config.get("gap_up_pct", 0.005),
     })
     return candidate
 
@@ -132,6 +140,7 @@ def run_grid(bars_by_symbol: dict[str, list[dict]], sectors: dict[str, str],
                     "metrics": result.get("metrics"),
                     "period": result.get("period"),
                 },
+                scheme_version=identity["scheme_version"],
             )
             row["config_hash"] = identity["key"]
         rows.append(row)
@@ -183,6 +192,9 @@ def main():
                         help="Comma-separated fast:slow pairs, e.g. 5:20,10:40")
     parser.add_argument("--exit-styles", default="signal",
                         help="Comma-separated signal, protective_only, trailing")
+    parser.add_argument("--premises", default="sma_crossover",
+                        help="Comma-separated sma_crossover, opening_range_breakout, "
+                             "gap_up; spread and RSI apply only to the SMA premise")
     parser.add_argument("--cost-bps", type=float, default=None,
                         help="Per-side cost; defaults to BACKTEST_COST_BPS")
     parser.add_argument("--split-fraction", type=float, default=0.7)
@@ -227,6 +239,7 @@ def main():
         _floats(args.spreads), _floats(args.rsis),
         _fast_slows(args.fast_slows),
         [item.strip() for item in args.exit_styles.split(",") if item.strip()],
+        [item.strip() for item in args.premises.split(",") if item.strip()],
     )
     sectors = {symbol: sector_for_symbol(symbol, settings) for symbol in bars_by_symbol}
     log.info("Running %s variants over %s symbols and %s bars",
