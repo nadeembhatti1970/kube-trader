@@ -49,6 +49,8 @@ POOL_WEIGHTS = {"intraday": 0.20, "swing": 0.30, "core": 0.50}
 RISK_VIEW_LOCK = threading.Lock()
 RISK_VIEW = {"value": None, "captured_at": 0.0}
 ENTRY_LOCK = threading.Lock()
+WARNING_LOG_LOCK = threading.Lock()
+WARNING_LOG: dict[str, float] = {}
 ACCOUNT_ACTIVITY_TYPES = ("FILL", "TRANS", "MISC", "FEE")
 
 
@@ -496,6 +498,29 @@ def notify_admin(message: str):
         log.exception("Could not deliver circuit-breaker alert")
 
 
+def log_reconciliation_warnings(warnings: list[str],
+                                repeat_seconds: int | None = None) -> None:
+    """Log each distinct warning once, repeating only when it clears or ages out.
+
+    The full warning list is still stored in the account snapshot; this only
+    controls log volume.
+    """
+    interval = (settings.reconcile_warning_repeat_seconds
+                if repeat_seconds is None else repeat_seconds)
+    now = time.monotonic()
+    with WARNING_LOG_LOCK:
+        current = set(warnings)
+        for message in list(WARNING_LOG):
+            if message not in current:
+                WARNING_LOG.pop(message, None)
+        for message in warnings:
+            last = WARNING_LOG.get(message)
+            if interval > 0 and last is not None and now - last < interval:
+                continue
+            WARNING_LOG[message] = now
+            log.warning("Reconciliation: %s", message)
+
+
 def reconcile(client_api: TradingClient):
     account = client_api.get_account()
     positions = client_api.get_all_positions()
@@ -667,8 +692,7 @@ def reconcile(client_api: TradingClient):
              "protection_summary": dict(sorted(protected_models.items())),
              "warnings": warnings,
              "allocations": allocations, "sector_exposures": sector_exposures}
-    for warning in warnings:
-        log.warning("Reconciliation: %s", warning)
+    log_reconciliation_warnings(warnings)
     save_account_snapshot(
         equity, buying_power, broker_positions, diffs,
         alpaca_account=serialize_account(account),

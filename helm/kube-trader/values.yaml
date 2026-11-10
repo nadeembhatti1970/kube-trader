@@ -54,6 +54,7 @@ config:
   backtestTrainFraction: "0.70"
   intradayBacktestBars: "50000"
   reconcileIntervalSeconds: "30"
+  reconcileWarningRepeatSeconds: "1800"
   alpacaActivitySyncSeconds: "300"
   alpacaActivityLookbackDays: "30"
   maxSignalAgeSeconds: "180"

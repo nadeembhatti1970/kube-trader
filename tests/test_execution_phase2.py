@@ -166,6 +166,40 @@ class LimitFallbackTests(unittest.TestCase):
         self.assertEqual(result.id, "limit-1")
 
 
+class ReconcileWarningThrottleTests(unittest.TestCase):
+    def setUp(self):
+        execution.WARNING_LOG.clear()
+
+    def tearDown(self):
+        execution.WARNING_LOG.clear()
+
+    def test_repeats_only_after_the_interval(self):
+        with patch("app.services.execution.time.monotonic",
+                   side_effect=[0, 30, 100]):
+            with self.assertLogs("execution", level="WARNING"):
+                execution.log_reconciliation_warnings(["issue"], repeat_seconds=60)
+            with self.assertNoLogs("execution", level="WARNING"):
+                execution.log_reconciliation_warnings(["issue"], repeat_seconds=60)
+            with self.assertLogs("execution", level="WARNING"):
+                execution.log_reconciliation_warnings(["issue"], repeat_seconds=60)
+
+    def test_a_warning_that_clears_logs_again(self):
+        with patch("app.services.execution.time.monotonic", side_effect=[0, 1, 2]):
+            with self.assertLogs("execution", level="WARNING"):
+                execution.log_reconciliation_warnings(["issue"], repeat_seconds=60)
+            with self.assertNoLogs("execution", level="WARNING"):
+                execution.log_reconciliation_warnings([], repeat_seconds=60)
+            with self.assertLogs("execution", level="WARNING"):
+                execution.log_reconciliation_warnings(["issue"], repeat_seconds=60)
+
+    def test_zero_interval_logs_each_cycle(self):
+        with patch("app.services.execution.time.monotonic", side_effect=[0, 1]):
+            with self.assertLogs("execution", level="WARNING"):
+                execution.log_reconciliation_warnings(["issue"], repeat_seconds=0)
+            with self.assertLogs("execution", level="WARNING"):
+                execution.log_reconciliation_warnings(["issue"], repeat_seconds=0)
+
+
 class ProtectionModelTests(unittest.TestCase):
     def test_unmanaged_position_is_labelled(self):
         model = execution.protection_model(

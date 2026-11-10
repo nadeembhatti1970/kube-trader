@@ -70,6 +70,7 @@ Alpaca's `StockDataStream` supplies minute bars. The configured feed defaults to
 | `INTRADAY_BACKTEST_BARS` | `50000` | Locally stored minute bars available to research backtests |
 | `MAX_SIGNAL_AGE_SECONDS` | `180` | Maximum signal age accepted by execution |
 | `RECONCILE_INTERVAL_SECONDS` | `30` | Account and position reconciliation interval |
+| `RECONCILE_WARNING_REPEAT_SECONDS` | `1800` | Repeat an unchanged reconciliation warning at most this often; `0` logs every cycle |
 | `ALERT_WEBHOOK_URL` | empty | Optional receiver for generic JSON breaker alerts |
 | `POSTGRES_DSN` / `REDIS_URL` | local defaults | Persistence and event-broker connections |
 

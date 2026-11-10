@@ -27,6 +27,7 @@ data:
   SWING_ATR_MULTIPLE: {{ .Values.config.swingAtrMultiple | quote }}
   CORE_STOP_LOSS_PCT: {{ .Values.config.coreStopLossPct | quote }}
   RECONCILE_INTERVAL_SECONDS: {{ .Values.config.reconcileIntervalSeconds | quote }}
+  RECONCILE_WARNING_REPEAT_SECONDS: {{ .Values.config.reconcileWarningRepeatSeconds | quote }}
   ALPACA_ACTIVITY_SYNC_SECONDS: {{ .Values.config.alpacaActivitySyncSeconds | quote }}
   ALPACA_ACTIVITY_LOOKBACK_DAYS: {{ .Values.config.alpacaActivityLookbackDays | quote }}
   MAX_SIGNAL_AGE_SECONDS: {{ .Values.config.maxSignalAgeSeconds | quote }}

@@ -60,6 +60,7 @@ class Settings(BaseSettings):
     alpaca_activity_sync_seconds: int = 300
     alpaca_activity_lookback_days: int = 30
     reconcile_interval_seconds: int = 30
+    reconcile_warning_repeat_seconds: int = 1800
     max_signal_age_seconds: int = 180
     execution_latency_warn_seconds: int = 30
     risk_view_ttl_seconds: float = 5.0
