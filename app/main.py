@@ -269,6 +269,7 @@ def research_portfolio(
     premise: str | None = Query(default=None),
     opening_range_minutes: int | None = Query(default=None, ge=1, le=120),
     gap_up_pct: float | None = Query(default=None, ge=0, le=0.2),
+    starting_equity: float | None = Query(default=None, ge=1_000, le=100_000_000),
 ):
     """Portfolio-level walk-forward research over the selected watchlist.
 
@@ -308,8 +309,17 @@ def research_portfolio(
         if not bars_by_symbol:
             raise HTTPException(status_code=404,
                                 detail="No stored minute bars for the requested symbols")
-        snapshot = latest_account_snapshot()
-        starting_equity = (float(snapshot["equity"]) if snapshot else 100_000.0)
+        if starting_equity is None:
+            snapshot = latest_account_snapshot()
+            if snapshot is None:
+                raise HTTPException(
+                    status_code=503,
+                    detail=("Account equity is unavailable; run reconciliation "
+                            "or pass starting_equity"))
+            starting_equity = float(snapshot["equity"])
+        if starting_equity <= 0:
+            raise HTTPException(
+                status_code=400, detail="starting_equity must be positive")
         config = {
             "starting_equity": starting_equity,
             "intraday_allocation_pct": settings.intraday_allocation_pct,
@@ -426,6 +436,7 @@ def research_daily_portfolio(
     regime_filter: bool = Query(default=False),
     regime_sma: int = Query(default=200, ge=20, le=300),
     regime_symbol: str = Query(default="SPY"),
+    starting_equity: float | None = Query(default=None, ge=1_000, le=100_000_000),
 ):
     """Portfolio-level simulation of the daily swing and core pools.
 
@@ -459,10 +470,20 @@ def research_daily_portfolio(
                     status_code=404,
                     detail=(f"Not enough stored daily bars for regime symbol "
                             f"{regime_symbol.upper()}; backfill it first"))
-        snapshot = latest_account_snapshot()
+        if starting_equity is None:
+            snapshot = latest_account_snapshot()
+            if snapshot is None:
+                raise HTTPException(
+                    status_code=503,
+                    detail=("Account equity is unavailable; run reconciliation "
+                            "or pass starting_equity"))
+            starting_equity = float(snapshot["equity"])
+        if starting_equity <= 0:
+            raise HTTPException(
+                status_code=400, detail="starting_equity must be positive")
         config = daily_config(
             settings,
-            float(snapshot["equity"]) if snapshot else 100_000.0,
+            starting_equity,
             cost_bps=cost_bps,
             split_fraction=(split_fraction if split_fraction is not None else 0.7),
             regime_filter_enabled=regime_filter,

@@ -16,7 +16,6 @@ from app.validation import significance_summary
 PERIODS_PER_YEAR = 252
 
 DEFAULT_CONFIG = {
-    "starting_equity": 100_000.0,
     "swing_allocation_pct": 0.30,
     "core_allocation_pct": 0.50,
     "swing_sma": 20,
@@ -161,6 +160,15 @@ def _prepare(bars: list[dict], config: dict) -> dict:
     }
 
 
+def _meaningful_quantity(qty: int, intended_qty: int) -> bool:
+    """Reject residual positions below half the intended size.
+
+    Tiny leftovers otherwise consume a slot and make the simulation depend on
+    small changes in account equity.
+    """
+    return qty >= 1 and qty * 2 >= max(1, intended_qty)
+
+
 def _regime_series(bars: list[dict], period: int) -> tuple[list[date], list[bool | None]]:
     normalized = _normalize(bars)
     closes = [bar["close"] for bar in normalized]
@@ -233,6 +241,9 @@ def simulate_daily_portfolio(bars_by_symbol: dict[str, list[dict]],
     """Simulate the swing and core pools together over supplied daily bars."""
     effective = dict(DEFAULT_CONFIG)
     effective.update(config or {})
+    if (config or {}).get("starting_equity") is None:
+        raise ValueError(
+            "starting_equity is required; pass the account equity, not a default")
     sectors = sectors or {}
     if not 0.5 <= float(effective["split_fraction"]) <= 0.9:
         raise ValueError("split_fraction must be between 0.5 and 0.9")
@@ -361,15 +372,16 @@ def simulate_daily_portfolio(bars_by_symbol: dict[str, list[dict]],
                 continue
             per_share_risk = max(price * stop_pct, 0.01)
             risk_budget = equity * min(float(effective["max_trade_risk_pct"]), 0.01)
-            qty = min(
-                math.floor(risk_budget / per_share_risk),
-                math.floor(available / price),
-                int(effective["max_shares_per_order"]) or math.floor(available / price),
-            )
+            risk_qty = math.floor(risk_budget / per_share_risk)
+            symbol_qty = math.floor(
+                equity * float(effective["max_symbol_exposure_pct"]) / price)
+            share_cap = int(effective["max_shares_per_order"]) or symbol_qty
+            intended_qty = max(1, min(risk_qty, symbol_qty, share_cap))
+            qty = min(risk_qty, math.floor(available / price), share_cap)
             risk_room = (equity * float(effective["max_portfolio_open_risk_pct"])
                          - open_risk())
             qty = min(qty, math.floor(max(risk_room, 0.0) / per_share_risk))
-            if qty < 1:
+            if not _meaningful_quantity(qty, intended_qty):
                 continue
             notional = qty * price
             cost = notional * cost_rate

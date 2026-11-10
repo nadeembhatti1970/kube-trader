@@ -300,18 +300,31 @@ def main():
     parser.add_argument("--split-fraction", type=float, default=0.7)
     parser.add_argument("--min-oos-trades", type=int,
                         default=settings.validation_min_trades)
+    parser.add_argument("--starting-equity", type=float, default=None,
+                        help="Override the capital base; defaults to live account equity")
     parser.add_argument("--persist", action="store_true",
                         help="Store each verdict in strategy_validation")
     args = parser.parse_args()
     if not 0.5 <= args.split_fraction <= 0.9:
         raise SystemExit("--split-fraction must be between 0.5 and 0.9")
+    if args.starting_equity is not None and args.starting_equity < 1_000:
+        raise SystemExit("--starting-equity must be at least 1000")
     try:
         symbols = resolve_symbols(args.symbols, args.max_symbols)
     except ValueError as exc:
         raise SystemExit(str(exc)) from exc
     init_db()
-    snapshot = latest_account_snapshot()
-    starting_equity = float(snapshot["equity"]) if snapshot else 100_000.0
+    if args.starting_equity is None:
+        snapshot = latest_account_snapshot()
+        if snapshot is None:
+            raise SystemExit(
+                "No account snapshot is available to determine equity; run "
+                "reconciliation or pass --starting-equity")
+        starting_equity = float(snapshot["equity"])
+    else:
+        starting_equity = args.starting_equity
+    if starting_equity <= 0:
+        raise SystemExit("starting equity must be positive")
 
     if args.mode == "daily":
         days = args.days if args.days is not None else 700

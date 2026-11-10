@@ -19,7 +19,6 @@ POOL_WEIGHTS = {"intraday": 0.20, "swing": 0.30, "core": 0.50}
 PERIODS_PER_YEAR = 390 * 252
 
 DEFAULT_CONFIG = {
-    "starting_equity": 100_000.0,
     "pool": "intraday",
     "intraday_allocation_pct": 0.20,
     "fast_bars": 5,
@@ -271,6 +270,9 @@ def simulate_portfolio(bars_by_symbol: dict[str, list[dict]], config: dict | Non
     """
     effective = dict(DEFAULT_CONFIG)
     effective.update(config or {})
+    if (config or {}).get("starting_equity") is None:
+        raise ValueError(
+            "starting_equity is required; pass the account equity, not a default")
     sectors = sectors or {}
     pool = str(effective["pool"])
     pool_weight = float(effective["intraday_allocation_pct"])

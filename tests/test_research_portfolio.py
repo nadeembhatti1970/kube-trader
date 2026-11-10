@@ -191,6 +191,37 @@ class PortfolioResearchEndpointTests(unittest.TestCase):
         self.assertTrue(body["validation"]["benchmark_relative_required"])
         self.assertFalse(body["validation"]["validated"])
 
+    def test_portfolio_endpoint_requires_equity_when_no_snapshot(self):
+        with patch.object(main, "latest_universe_snapshot",
+                          return_value=[{"symbol": "AAPL", "selected": True}]), \
+                patch.object(main, "recent_bars", return_value=rising_bars()), \
+                patch.object(main, "latest_account_snapshot", return_value=None):
+            response = self.client.get("/research/portfolio", params={"days": 500})
+
+        self.assertEqual(response.status_code, 503)
+
+    def test_explicit_starting_equity_works_without_a_snapshot(self):
+        with patch.object(main, "latest_universe_snapshot",
+                          return_value=[{"symbol": "AAPL", "selected": True}]), \
+                patch.object(main, "recent_bars", return_value=rising_bars()), \
+                patch.object(main, "latest_account_snapshot", return_value=None):
+            response = self.client.get("/research/portfolio", params={
+                "days": 500, "starting_equity": 50_000})
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.json()["config"]["starting_equity"], 50_000)
+
+    def test_daily_endpoint_requires_equity_when_no_snapshot(self):
+        with patch.object(main, "latest_universe_snapshot",
+                          return_value=[{"symbol": "AAPL", "selected": True}]), \
+                patch.object(main, "recent_daily_bars",
+                             return_value=daily_rising_bars()), \
+                patch.object(main, "latest_account_snapshot", return_value=None):
+            response = self.client.get(
+                "/research/portfolio/daily", params={"days": 260})
+
+        self.assertEqual(response.status_code, 503)
+
     def test_daily_endpoint_requires_daily_bars(self):
         with patch.object(main, "latest_universe_snapshot",
                           return_value=[{"symbol": "AAPL", "selected": True}]), \

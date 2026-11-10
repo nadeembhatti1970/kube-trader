@@ -1,7 +1,8 @@
 import unittest
 from datetime import date, timedelta
 
-from app.portfolio_daily_sim import _regime_allows, simulate_daily_portfolio
+from app.portfolio_daily_sim import (_meaningful_quantity, _regime_allows,
+                                     simulate_daily_portfolio)
 
 
 def daily(closes, start=date(2026, 1, 5)):
@@ -19,8 +20,8 @@ def daily(closes, start=date(2026, 1, 5)):
     return bars
 
 
-BASE = {"swing_sma": 20, "core_fast": 50, "core_slow": 200,
-        "cost_bps_per_side": 0.0}
+BASE = {"starting_equity": 100_000.0, "swing_sma": 20, "core_fast": 50,
+        "core_slow": 200, "cost_bps_per_side": 0.0}
 
 
 class DailySimulationTests(unittest.TestCase):
@@ -116,6 +117,18 @@ class DailySimulationTests(unittest.TestCase):
         self.assertTrue(_regime_allows(days, values, date(2026, 1, 6)))
         self.assertFalse(_regime_allows(days, values, date(2026, 1, 7)))
         self.assertTrue(_regime_allows([date(2026, 1, 5)], [None], date(2026, 1, 6)))
+
+    def test_residual_positions_are_rejected(self):
+        self.assertFalse(_meaningful_quantity(0, 49))
+        self.assertFalse(_meaningful_quantity(1, 49))
+        self.assertFalse(_meaningful_quantity(24, 50))
+        self.assertTrue(_meaningful_quantity(25, 50))
+        self.assertTrue(_meaningful_quantity(1, 1))
+
+    def test_starting_equity_is_required(self):
+        with self.assertRaises(ValueError):
+            simulate_daily_portfolio({"AAPL": daily([100.0] * 30)},
+                                     {"swing_sma": 20})
 
     def test_invalid_split_fraction_is_rejected(self):
         with self.assertRaises(ValueError):

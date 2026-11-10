@@ -25,7 +25,8 @@ def fake_result(oos_mean, n, ci_low, ci_high, pf=1.2,
     }
 
 
-BASE = {"cost_bps_per_side": 5.0, "split_fraction": 0.7}
+BASE = {"starting_equity": 100_000.0, "cost_bps_per_side": 5.0,
+        "split_fraction": 0.7}
 
 
 class VariantTests(unittest.TestCase):
@@ -145,6 +146,7 @@ class RunGridTests(unittest.TestCase):
 
 
 DAILY_BASE = {
+    "starting_equity": 100_000.0,
     "swing_allocation_pct": 0.30, "core_allocation_pct": 0.50,
     "swing_sma": 20, "swing_atr_period": 14, "swing_atr_multiple": 2.0,
     "core_fast": 50, "core_slow": 200, "core_stop_loss_pct": 0.20,

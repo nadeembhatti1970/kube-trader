@@ -34,6 +34,7 @@ def breakout_path():
 
 
 BASE = {
+    "starting_equity": 100_000.0,
     "intraday_entry_start_minutes": 0,
     "intraday_entry_cutoff_minutes": 0,
     "intraday_flatten_minutes": 0,
@@ -171,7 +172,7 @@ class PortfolioSimulationTests(unittest.TestCase):
         after = [101.5 + 0.01 * index for index in range(366)]
         result = simulate_portfolio(
             {"AAPL": bars_from(window + after)},
-            {"intraday_entry_start_minutes": 0, "intraday_entry_cutoff_minutes": 0,
+            {"starting_equity": 100_000.0, "intraday_entry_start_minutes": 0, "intraday_entry_cutoff_minutes": 0,
              "intraday_flatten_minutes": 10, "take_profit_pct": 0.5,
              "stop_loss_pct": 0.2, "cost_bps_per_side": 0.0,
              "premise": "opening_range_breakout", "opening_range_minutes": 15},
@@ -192,7 +193,7 @@ class PortfolioSimulationTests(unittest.TestCase):
         day_two[0]["open"] = 101.0  # 1% above the prior close
         result = simulate_portfolio(
             {"AAPL": day_one + day_two},
-            {"intraday_entry_start_minutes": 0, "intraday_entry_cutoff_minutes": 0,
+            {"starting_equity": 100_000.0, "intraday_entry_start_minutes": 0, "intraday_entry_cutoff_minutes": 0,
              "intraday_flatten_minutes": 10, "take_profit_pct": 0.5,
              "stop_loss_pct": 0.2, "cost_bps_per_side": 0.0,
              "premise": "gap_up", "gap_up_pct": 0.005},
@@ -211,7 +212,7 @@ class PortfolioSimulationTests(unittest.TestCase):
         day_two[0]["open"] = 101.0
         result = simulate_portfolio(
             {"AAPL": day_one + day_two},
-            {"intraday_entry_start_minutes": 5, "intraday_entry_cutoff_minutes": 0,
+            {"starting_equity": 100_000.0, "intraday_entry_start_minutes": 5, "intraday_entry_cutoff_minutes": 0,
              "intraday_flatten_minutes": 10, "take_profit_pct": 0.5,
              "stop_loss_pct": 0.2, "cost_bps_per_side": 0.0,
              "premise": "gap_up", "gap_up_pct": 0.005},
@@ -219,6 +220,11 @@ class PortfolioSimulationTests(unittest.TestCase):
 
         self.assertEqual(len(result["trades"]), 1)
         self.assertTrue(result["trades"][0]["entry_ts"].startswith("2026-11-09"))
+
+    def test_starting_equity_is_required(self):
+        with self.assertRaises(ValueError):
+            simulate_portfolio({"AAPL": bars_from(breakout_path())},
+                               {"cost_bps_per_side": 0.0})
 
     def test_invalid_premise_is_rejected(self):
         with self.assertRaises(ValueError):
