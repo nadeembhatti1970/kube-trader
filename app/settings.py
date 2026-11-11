@@ -40,6 +40,7 @@ class Settings(BaseSettings):
     extended_hours_sample_seconds: int = 300
     max_trade_risk_pct: float = 0.01
     max_portfolio_open_risk_pct: float = 0.02
+    min_entry_notional: float = 100.0
     daily_drawdown_limit_pct: float = 0.03
     stop_loss_pct: float = 0.02
     take_profit_pct: float = 0.04

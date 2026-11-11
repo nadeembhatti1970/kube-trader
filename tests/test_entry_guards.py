@@ -130,6 +130,7 @@ class PlaceEntryGuardTests(unittest.TestCase):
             "max_open_positions": 20,
             "symbol_loss_cooldown_seconds": 0,
             "symbol_daily_loss_limit": 0.0,
+            "min_entry_notional": 100.0,
         }
         defaults.update(overrides)
         patches = [patch.object(execution.settings, key, value)
@@ -213,6 +214,48 @@ class PlaceEntryGuardTests(unittest.TestCase):
         request = client.requests[0]
         self.assertIsNone(request.order_class)
         self.assertFalse(float(request.qty).is_integer())
+
+    def test_residual_quantity_below_half_the_intended_size_is_skipped(self):
+        class RecordingClient(FakeClient):
+            def __init__(self):
+                self.requests = []
+
+            def submit_order(self, request):
+                self.requests.append(request)
+                return super().submit_order(request)
+
+        client = RecordingClient()
+        # A $100 pool remainder would buy one share of a $100 stock while the
+        # risk and symbol caps intend 50 shares: a residual, not a position.
+        self.risk["reconciliation"]["allocations"]["intraday"]["remaining"] = 100.0
+        with patch("app.services.execution.entry_count_since", return_value=0), \
+                self.assertLogs("execution", level="INFO") as captured:
+            self.run_entry(client=client)
+
+        self.assertEqual(client.requests, [])
+        self.assertIn("below half the intended", "".join(captured.output))
+
+    def test_entry_below_the_minimum_notional_is_skipped(self):
+        class RecordingClient(FakeClient):
+            def __init__(self):
+                self.requests = []
+
+            def submit_order(self, request):
+                self.requests.append(request)
+                return super().submit_order(request)
+
+        client = RecordingClient()
+        # A small account caps the intended size at half a share, so the
+        # residual rule passes and only the notional floor blocks the entry.
+        self.risk["equity"] = 1_000.0
+        self.risk["buying_power"] = 1_000.0
+        self.risk["reconciliation"]["allocations"]["intraday"]["remaining"] = 45.0
+        with patch("app.services.execution.entry_count_since", return_value=0), \
+                self.assertLogs("execution", level="INFO") as captured:
+            self.run_entry(client=client)
+
+        self.assertEqual(client.requests, [])
+        self.assertIn("below MIN_ENTRY_NOTIONAL", "".join(captured.output))
 
     def test_low_bar_coverage_blocks_the_entry(self):
         with patch("app.services.execution.minutes_since_open", return_value=100.0), \

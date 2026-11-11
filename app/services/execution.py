@@ -1212,12 +1212,16 @@ def place_entry(client_api: TradingClient, event: dict, signal_id: str,
                 log.info("Asset %s is not fractionable; using whole shares", symbol)
         except Exception:
             log.exception("Unable to check whether %s is fractionable", symbol)
+    risk_qty = risk_budget / (price * stop_loss_pct)
+    symbol_cap = equity * settings.max_symbol_exposure_pct / price
     if fractional:
-        qty = min(risk_budget / (price * stop_loss_pct), available / price, 100.0)
+        intended_qty = max(1e-4, min(risk_qty, symbol_cap, 100.0))
+        qty = min(risk_qty, available / price, 100.0)
         qty = round(qty, settings.fractional_qty_decimals)
     else:
-        qty = min(math.floor(risk_budget / (price * stop_loss_pct)),
-                  math.floor(available / price), 100)
+        risk_qty = math.floor(risk_qty)
+        intended_qty = max(1, min(risk_qty, math.floor(symbol_cap), 100))
+        qty = min(risk_qty, math.floor(available / price), 100)
     qty = cap_entry_quantity(
         qty, price, stop_loss_pct, equity,
         float(risk.get("open_risk") or 0.0),
@@ -1229,6 +1233,19 @@ def place_entry(client_api: TradingClient, event: dict, signal_id: str,
     minimum = 1e-4 if fractional and pool == "intraday" else 1
     if qty < minimum:
         log.info("Risk/allocation limits leave no tradable quantity for %s", symbol)
+        return False
+    if qty * 2 < max(minimum, intended_qty):
+        # Residual sizes below half the intended position occupy a slot and a
+        # protective order for a fraction of the risk budget; skip them.
+        log.info(
+            "Ignoring %s entry: %.4f shares is below half the intended %.4f after "
+            "risk and allocation limits", symbol, qty, intended_qty)
+        return False
+    notional = qty * price
+    if settings.min_entry_notional > 0 and notional < settings.min_entry_notional:
+        log.info(
+            "Ignoring %s entry: notional %.2f is below MIN_ENTRY_NOTIONAL %.2f",
+            symbol, notional, settings.min_entry_notional)
         return False
 
     client_order_id = "kt-" + hashlib.sha256(f"{symbol}:{pool}:{signal_id}".encode()).hexdigest()[:28]
@@ -1252,8 +1269,10 @@ def place_entry(client_api: TradingClient, event: dict, signal_id: str,
             "equity_at_entry": equity,
             "pool_available_before_order": available,
             "risk_budget": risk_budget,
+            "intended_quantity": intended_qty,
             "quantity": qty,
-            "notional_at_reference_price": qty * price,
+            "notional_at_reference_price": notional,
+            "min_entry_notional": settings.min_entry_notional,
             "risk_at_submitted_stop": qty * max(price - stop_price, 0.0),
         },
     })

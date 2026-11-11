@@ -35,6 +35,7 @@ Alpaca's `StockDataStream` supplies minute bars. The configured feed defaults to
 | `ALPACA_DATA_FEED` | `iex` | Alpaca stock stream feed, `iex` or `sip` |
 | `MAX_TRADE_RISK_PCT` | `0.01` | Requested risk budget, capped in code at 1% of equity |
 | `MAX_PORTFOLIO_OPEN_RISK_PCT` | `0.02` | Cap on summed stop-risk across managed open positions; `0` disables |
+| `MIN_ENTRY_NOTIONAL` | `100` | Skip entries below this notional; residual sizes under half the intended quantity are also skipped |
 | `MAX_ENTRIES_PER_5MIN` | `3` | Rolling five-minute cap on new orders; `0` disables |
 | `INTRADAY_ENTRY_START_MINUTES` | `5` | Minutes after the open before intraday entries are allowed |
 | `INTRADAY_DAILY_LOSS_LIMIT_PCT` | `0.005` | Session realized-loss halt for new intraday entries |
@@ -100,7 +101,7 @@ Each pool's target equity is `account_equity * target_ratio`. Broker position ma
 3. a 100-share per-order ceiling; and
 4. remaining room under `MAX_PORTFOLIO_OPEN_RISK_PCT`, which caps summed stop-risk across managed open positions.
 
-Entries are also gated by `MAX_ENTRIES_PER_5MIN` (rolling burst cap), `INTRADAY_ENTRY_START_MINUTES`, `INTRADAY_ENTRY_CUTOFF_MINUTES`, and `INTRADAY_DAILY_LOSS_LIMIT_PCT`. The last one pauses intraday entries for the session once that pool's realized loss reaches the configured share of equity; the account-wide `DAILY_DRAWDOWN_LIMIT_PCT` breaker is unchanged.
+Entries are also gated by `MAX_ENTRIES_PER_5MIN` (rolling burst cap), `INTRADAY_ENTRY_START_MINUTES`, `INTRADAY_ENTRY_CUTOFF_MINUTES`, and `INTRADAY_DAILY_LOSS_LIMIT_PCT`. The last one pauses intraday entries for the session once that pool's realized loss reaches the configured share of equity; the account-wide `DAILY_DRAWDOWN_LIMIT_PCT` breaker is unchanged. Two size floors then apply: an entry is skipped when the computed quantity is below half the intended size (the minimum of the risk budget, the symbol cap, and the 100-share ceiling), and when its notional is below `MIN_ENTRY_NOTIONAL`. Both reject residual slices that would occupy a position slot and a protective order for a fraction of the risk budget.
 
 All three pools generate signals. Intraday entries use day bracket orders with default 2% stop and 4% take-profit. Swing and core entries use GTC OTO orders with a single protective stop and no fixed take-profit; their daily trend exits close the bot-managed pool position after canceling its attached exit order. The 20/30/50 pool balances are virtual limits inside one brokerage account: the application does not transfer cash between accounts or automatically sell holdings to rebalance pool ratios.
 

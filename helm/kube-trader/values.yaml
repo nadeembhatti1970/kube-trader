@@ -32,6 +32,7 @@ config:
   intradayEntryStartMinutes: "5"
   intradayDailyLossLimitPct: "0.005"
   maxEntriesPer5min: "3"
+  minEntryNotional: "100"
   maxPortfolioOpenRiskPct: "0.02"
   symbolLossCooldownSeconds: "1800"
   symbolDailyLossLimit: "50"

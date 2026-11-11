@@ -13,6 +13,7 @@ data:
   STOP_MANAGEMENT_ENABLED: {{ .Values.config.stopManagementEnabled | quote }}
   REDIS_URL: redis://{{ include "kube-trader.fullname" . }}-redis:6379/0
   MAX_TRADE_RISK_PCT: {{ .Values.config.maxTradeRiskPct | quote }}
+  MIN_ENTRY_NOTIONAL: {{ .Values.config.minEntryNotional | quote }}
   DAILY_DRAWDOWN_LIMIT_PCT: {{ .Values.config.dailyDrawdownLimitPct | quote }}
   STOP_LOSS_PCT: {{ .Values.config.stopLossPct | quote }}
   TAKE_PROFIT_PCT: {{ .Values.config.takeProfitPct | quote }}
