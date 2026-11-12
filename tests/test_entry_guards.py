@@ -108,6 +108,10 @@ class PortfolioRiskCapTests(unittest.TestCase):
 
 class PlaceEntryGuardTests(unittest.TestCase):
     def setUp(self):
+        # Module-level caches must not leak between cases.
+        execution.FRACTIONABLE.clear()
+        execution.TRADE_HISTORY["value"] = None
+        execution.TRADE_HISTORY["captured_at"] = 0.0
         self.event = {
             "action": "buy",
             "symbol": "AAPL",
@@ -293,6 +297,83 @@ class PlaceEntryGuardTests(unittest.TestCase):
             self.run_entry(intraday_daily_loss_limit_pct=0.005)
 
         self.assertNotIn("session loss limit", "".join(captured.output))
+
+    def test_fractionability_lookup_is_cached_per_symbol(self):
+        class CountingClient(FakeClient):
+            def __init__(self):
+                self.asset_calls = 0
+
+            def get_asset(self, _symbol):
+                self.asset_calls += 1
+                return SimpleNamespace(fractionable=True)
+
+        client = CountingClient()
+        with patch("app.services.execution.entry_count_since", return_value=0), \
+                patch("app.services.execution.ensure_fractional_stop"):
+            self.run_entry(client=client)
+            self.run_entry(client=client)
+
+        self.assertEqual(client.asset_calls, 1)
+
+    def test_realized_trade_history_is_reused_within_its_ttl(self):
+        calls = []
+
+        def report(*_args, **_kwargs):
+            calls.append(1)
+            return {"trades": []}
+
+        with patch("app.services.execution.managed_fills", return_value=[]), \
+                patch("app.services.execution.build_realized_trade_report", side_effect=report):
+            execution.session_trades()
+            execution.session_trades()
+
+        self.assertEqual(len(calls), 1)
+
+
+class ReconcileCostTests(unittest.TestCase):
+    def setUp(self):
+        execution.SESSION_BASELINE["session_date"] = None
+        execution.SESSION_BASELINE["value"] = None
+        execution.SNAPSHOT["captured_at"] = 0.0
+
+    def test_session_baseline_is_read_once_per_session(self):
+        class History:
+            equity = [100.0, 101.0]
+
+        calls = []
+
+        class Client:
+            def get_portfolio_history(self, _request):
+                calls.append(1)
+                return History()
+
+        today = datetime.now(NY).date()
+        first = execution.session_baseline(Client(), today)
+        second = execution.session_baseline(Client(), today)
+
+        self.assertAlmostEqual(first, 100.0)
+        self.assertAlmostEqual(second, 100.0)
+        self.assertEqual(len(calls), 1)
+
+    def test_session_baseline_refreshes_for_a_new_session(self):
+        class History:
+            equity = [100.0]
+
+        class Client:
+            def get_portfolio_history(self, _request):
+                return History()
+
+        today = datetime.now(NY).date()
+        execution.session_baseline(Client(), today)
+        execution.session_baseline(Client(), today + timedelta(days=1))
+
+        self.assertEqual(execution.SESSION_BASELINE["session_date"], today + timedelta(days=1))
+
+    def test_snapshot_is_written_once_per_window(self):
+        self.assertTrue(execution.snapshot_due())
+        self.assertFalse(execution.snapshot_due())
+        execution.SNAPSHOT["captured_at"] -= execution.SNAPSHOT_MIN_SECONDS
+        self.assertTrue(execution.snapshot_due())
 
 
 if __name__ == "__main__":

@@ -49,6 +49,20 @@ NY = ZoneInfo("America/New_York")
 POOL_WEIGHTS = {"intraday": 0.20, "swing": 0.30, "core": 0.50}
 RISK_VIEW_LOCK = threading.Lock()
 RISK_VIEW = {"value": None, "captured_at": 0.0}
+# Session opening equity from a one-minute portfolio history (~3.5s); fixed per session.
+SESSION_BASELINE = {"session_date": None, "value": None}
+# The account snapshot write costs ~1.6s and only feeds reporting.
+SNAPSHOT_MIN_SECONDS = 30.0
+SNAPSHOT_LOCK = threading.Lock()
+SNAPSHOT = {"captured_at": 0.0}
+# Fractionability is static per asset, so one lookup per symbol is enough.
+FRACTIONABLE_LOCK = threading.Lock()
+FRACTIONABLE: dict[str, bool] = {}
+# Rebuilding realized slices costs ~1.4s over 1000+ fills and only feeds loss
+# cooldowns and session loss limits, which are minutes-scale rules.
+TRADE_HISTORY_TTL_SECONDS = 5.0
+TRADE_HISTORY_LOCK = threading.Lock()
+TRADE_HISTORY = {"value": None, "captured_at": 0.0}
 ENTRY_LOCK = threading.Lock()
 WARNING_LOG_LOCK = threading.Lock()
 WARNING_LOG: dict[str, float] = {}
@@ -641,12 +655,57 @@ def log_reconciliation_warnings(warnings: list[str],
             log.warning("Reconciliation: %s", message)
 
 
+def concurrent_account_reads(client_api: TradingClient):
+    """Fetch the independent account reads in parallel.
+
+    Each broker round trip costs ~100ms from this deployment, and the entries that
+    follow a signal wait on all of them.
+    """
+    with ThreadPoolExecutor(max_workers=3) as pool:
+        account = pool.submit(client_api.get_account)
+        positions = pool.submit(client_api.get_all_positions)
+        orders = pool.submit(client_api.get_orders, GetOrdersRequest(
+            status=QueryOrderStatus.OPEN, limit=500, nested=True))
+        return account.result(), positions.result(), orders.result()
+
+
+def snapshot_due() -> bool:
+    """Persist an account snapshot at most once per window; the write costs ~1.6s."""
+    with SNAPSHOT_LOCK:
+        if time.monotonic() - SNAPSHOT["captured_at"] < SNAPSHOT_MIN_SECONDS:
+            return False
+        SNAPSHOT["captured_at"] = time.monotonic()
+        return True
+
+
+def session_baseline(client_api: TradingClient, session_date) -> float | None:
+    """Opening equity of the session, from portfolio history.
+
+    A one-minute portfolio history costs 3-4s, far more than any other broker read,
+    and the first equity value of a session never changes once it exists. Fetch it
+    once per session (and once after a restart) instead of on every reconcile.
+    """
+    if (SESSION_BASELINE["session_date"] == session_date
+            and SESSION_BASELINE["value"] is not None):
+        return SESSION_BASELINE["value"]
+    try:
+        history = client_api.get_portfolio_history(GetPortfolioHistoryRequest(
+            period="1D", timeframe="1Min", intraday_reporting="market_hours",
+        ))
+        values = [float(value) for value in (history.equity or [])
+                  if value is not None and float(value) > 0]
+    except Exception:
+        log.exception("Portfolio history unavailable; using account previous-close equity")
+        return None
+    value = values[0] if values else None
+    if value is not None:
+        SESSION_BASELINE["session_date"] = session_date
+        SESSION_BASELINE["value"] = value
+    return value
+
+
 def reconcile(client_api: TradingClient):
-    account = client_api.get_account()
-    positions = client_api.get_all_positions()
-    open_orders = client_api.get_orders(GetOrdersRequest(
-        status=QueryOrderStatus.OPEN, limit=500, nested=True,
-    ))
+    account, positions, open_orders = concurrent_account_reads(client_api)
     protected = set()
     protective_orders = defaultdict(list)
     target_orders = defaultdict(list)
@@ -832,27 +891,24 @@ def reconcile(client_api: TradingClient):
              "warnings": warnings,
              "allocations": allocations, "sector_exposures": sector_exposures}
     log_reconciliation_warnings(warnings)
-    save_account_snapshot(
-        equity, buying_power, broker_positions, diffs,
-        alpaca_account=serialize_account(account),
-        open_orders=[serialize_order(order) for order in open_orders],
-        orders=[serialize_order(order) for order in open_orders],
-        trading_mode="paper" if settings.alpaca_paper else "live",
-    )
+    if snapshot_due():
+        save_account_snapshot(
+            equity, buying_power, broker_positions, diffs,
+            alpaca_account=serialize_account(account),
+            open_orders=[serialize_order(order) for order in open_orders],
+            orders=[serialize_order(order) for order in open_orders],
+            trading_mode="paper" if settings.alpaca_paper else "live",
+        )
 
     today = datetime.now(NY).date()
     state = get_risk_state(today)
     history_start = None
-    try:
-        history = client_api.get_portfolio_history(GetPortfolioHistoryRequest(
-            period="1D", timeframe="1Min", intraday_reporting="market_hours",
-        ))
-        history_values = [float(value) for value in (history.equity or [])
-                          if value is not None and float(value) > 0]
-        if history_values:
-            history_start = history_values[0]
-    except Exception:
-        log.exception("Portfolio history unavailable; using account previous-close equity")
+    if not state or state["session_date"] != today:
+        history_start = session_baseline(client_api, today)
+    elif SESSION_BASELINE["session_date"] != today:
+        # First reconcile of this process: refresh a baseline that may have been
+        # recorded from the previous-close fallback before history was available.
+        history_start = session_baseline(client_api, today)
     fallback_start = float(account.last_equity or equity)
     if not state or state["session_date"] != today:
         save_risk_state(today, history_start or fallback_start, False, None)
@@ -880,6 +936,34 @@ def invalidate_risk_view():
     with RISK_VIEW_LOCK:
         RISK_VIEW["value"] = None
         RISK_VIEW["captured_at"] = 0.0
+
+
+def asset_is_fractionable(client_api: TradingClient, symbol: str) -> bool:
+    """Cache the asset lookup; a missing asset is treated as non-fractionable."""
+    with FRACTIONABLE_LOCK:
+        if symbol in FRACTIONABLE:
+            return FRACTIONABLE[symbol]
+    try:
+        fractionable = bool(getattr(client_api.get_asset(symbol), "fractionable", False))
+    except Exception:
+        log.exception("Unable to check whether %s is fractionable", symbol)
+        return True
+    with FRACTIONABLE_LOCK:
+        FRACTIONABLE[symbol] = fractionable
+    return fractionable
+
+
+def session_trades() -> list[dict]:
+    """Realized slices for the entry guards, refreshed at most once per TTL."""
+    with TRADE_HISTORY_LOCK:
+        if (TRADE_HISTORY["value"] is not None
+                and time.monotonic() - TRADE_HISTORY["captured_at"]
+                <= TRADE_HISTORY_TTL_SECONDS):
+            return TRADE_HISTORY["value"]
+        trades = build_realized_trade_report(managed_fills())["trades"]
+        TRADE_HISTORY["value"] = trades
+        TRADE_HISTORY["captured_at"] = time.monotonic()
+        return trades
 
 
 def cached_risk_view(client_api: TradingClient, max_age_seconds: float | None = None):
@@ -1167,19 +1251,18 @@ def place_entry(client_api: TradingClient, event: dict, signal_id: str,
         or settings.symbol_daily_loss_limit > 0
         or (pool == "intraday" and settings.intraday_daily_loss_limit_pct > 0)
     )
-    session_trades = build_realized_trade_report(managed_fills())["trades"] \
-        if needs_trade_history else []
+    session_trade_rows = session_trades() if needs_trade_history else []
     if settings.symbol_loss_cooldown_seconds > 0 or settings.symbol_daily_loss_limit > 0:
         now = datetime.now(NY)
         block = symbol_entry_block(
-            session_trades, symbol, now, now.date(),
+            session_trade_rows, symbol, now, now.date(),
             settings.symbol_loss_cooldown_seconds, settings.symbol_daily_loss_limit, NY)
         if block:
             log.info("Ignoring entry: %s", block)
             return False
     if pool == "intraday" and settings.intraday_daily_loss_limit_pct > 0 and risk.get("equity"):
         pool_loss = pool_session_realized(
-            session_trades, pool, session_now.date(), NY)
+            session_trade_rows, pool, session_now.date(), NY)
         pool_limit = risk["equity"] * settings.intraday_daily_loss_limit_pct
         if pool_loss <= -pool_limit:
             log.warning(
@@ -1205,13 +1288,9 @@ def place_entry(client_api: TradingClient, event: dict, signal_id: str,
     risk_budget = equity * min(settings.max_trade_risk_pct, 0.01)
     fractional = bool(settings.fractional_shares_enabled)
     if fractional and pool == "intraday":
-        try:
-            asset = client_api.get_asset(symbol)
-            if not getattr(asset, "fractionable", False):
-                fractional = False
-                log.info("Asset %s is not fractionable; using whole shares", symbol)
-        except Exception:
-            log.exception("Unable to check whether %s is fractionable", symbol)
+        if not asset_is_fractionable(client_api, symbol):
+            fractional = False
+            log.info("Asset %s is not fractionable; using whole shares", symbol)
     risk_qty = risk_budget / (price * stop_loss_pct)
     symbol_cap = equity * settings.max_symbol_exposure_pct / price
     if fractional:

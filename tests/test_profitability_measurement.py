@@ -150,6 +150,11 @@ class LatencyTests(unittest.TestCase):
         self.assertEqual(summary["entry"]["count"], 0)
         self.assertIsNone(summary["entry"]["p90_seconds"])
 
+    def test_latency_reports_the_bar_close_basis(self):
+        summary = execution_latency([{"entry_signal_to_fill_seconds": 3.0}])
+        self.assertIn("signal_timestamp", summary["basis"])
+        self.assertAlmostEqual(summary["entry"]["p50_seconds"], 3.0)
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -25,8 +25,12 @@ def ensure_group(connection, stream: str, group: str):
 
 
 def read_group(connection, group: str, consumer: str, stream: str,
-               count: int = 20, block: int = 5000):
-    """Recover abandoned pending events before reading new stream entries."""
+               count: int = 20, block: int = 1000):
+    """Recover abandoned pending events before reading new stream entries.
+
+    The block timeout only bounds how long an idle consumer sleeps; a published entry
+    wakes it immediately, so it is not a latency source on its own.
+    """
     claimed = connection.xautoclaim(stream, group, consumer, min_idle_time=30_000,
                                    start_id="0-0", count=count)
     if len(claimed) > 1 and claimed[1]:

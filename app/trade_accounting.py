@@ -1,11 +1,37 @@
 import json
 from collections import defaultdict, deque
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 
 def _sort_timestamp(fill: dict) -> datetime:
     return (fill.get("filled_at") or fill.get("submitted_at")
             or datetime.min.replace(tzinfo=timezone.utc))
+
+
+def signal_bar_seconds(fill: dict) -> float:
+    """Length of the bar that produced this signal; 0 when the event had no bar."""
+    config = fill.get("strategy_config") or {}
+    try:
+        return max(0.0, float(config.get("signal_bar_seconds") or 0.0))
+    except (TypeError, ValueError):
+        return 0.0
+
+
+def signal_ready_at(fill: dict) -> datetime | None:
+    """When the signal became computable: the signal bar's close, not its open."""
+    timestamp = fill.get("signal_timestamp")
+    if timestamp is None:
+        return None
+    return timestamp + timedelta(seconds=signal_bar_seconds(fill))
+
+
+def signal_to_fill_seconds(fill: dict) -> float | None:
+    if not fill.get("filled_at"):
+        return None
+    ready = signal_ready_at(fill)
+    if ready is None:
+        return None
+    return (fill["filled_at"] - ready).total_seconds()
 
 
 def _summarize(trades: list[dict]) -> dict:
@@ -265,6 +291,8 @@ def execution_latency(trades: list[dict], warn_seconds: float = 30.0) -> dict:
 
     return {
         "warn_seconds": warn_seconds,
+        "basis": ("fill time minus the signal bar's close "
+                  "(signal_timestamp + signal_bar_seconds)"),
         "entry": summary("entry_signal_to_fill_seconds"),
         "exit": summary("exit_signal_to_fill_seconds"),
     }
@@ -367,14 +395,10 @@ def build_realized_trade_report(fills: list[dict], account_fees: list[dict] | No
                 "exit_signal_timestamp": fill.get("signal_timestamp"),
                 "entry_reference_timestamp": entry_fill.get("reference_timestamp"),
                 "exit_reference_timestamp": fill.get("reference_timestamp"),
-                "entry_signal_to_fill_seconds": (
-                    (entry_fill["filled_at"] - entry_fill["signal_timestamp"]).total_seconds()
-                    if entry_fill.get("filled_at") and entry_fill.get("signal_timestamp") else None
-                ),
-                "exit_signal_to_fill_seconds": (
-                    (fill["filled_at"] - fill["signal_timestamp"]).total_seconds()
-                    if fill.get("filled_at") and fill.get("signal_timestamp") else None
-                ),
+                "entry_signal_to_fill_seconds": signal_to_fill_seconds(entry_fill),
+                "exit_signal_to_fill_seconds": signal_to_fill_seconds(fill),
+                "entry_signal_bar_seconds": signal_bar_seconds(entry_fill),
+                "exit_signal_bar_seconds": signal_bar_seconds(fill),
                 "entry_submitted_at": entry_fill.get("submitted_at"),
                 "exit_submitted_at": fill.get("submitted_at"),
                 "entry_filled_at": entry_fill.get("filled_at"),

@@ -133,6 +133,9 @@ def strategy_config(settings: Settings | None = None, event: dict | None = None)
         "fractional_shares_enabled": current.fractional_shares_enabled,
         "fractional_qty_decimals": current.fractional_qty_decimals,
         "mandate": current.validation_mandate,
+        # Cost assumptions are part of the strategy's economics, so a verdict
+        # computed at one cost cannot satisfy a gate configured for another.
+        "backtest_cost_bps": current.backtest_cost_bps,
         "risk_controls": {
             "configured_max_trade_risk_pct": current.max_trade_risk_pct,
             "effective_max_trade_risk_pct": min(current.max_trade_risk_pct, 0.01),
@@ -164,4 +167,7 @@ def strategy_config(settings: Settings | None = None, event: dict | None = None)
         }
         if signal_values:
             result["signal_values"] = signal_values
+        # Recorded so fill latency can be measured from the completed bar, not the
+        # bar's open timestamp. Events without a bar (flatten timers) carry none.
+        result["signal_bar_seconds"] = int(event.get("signal_bar_seconds") or 0)
     return result

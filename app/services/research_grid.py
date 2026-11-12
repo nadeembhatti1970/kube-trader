@@ -92,6 +92,7 @@ def _candidate_config(config: dict) -> dict:
         "opening_range_minutes": config.get("opening_range_minutes", 15),
         "gap_up_pct": config.get("gap_up_pct", 0.005),
         "mandate": config.get("mandate", "relative"),
+        "backtest_cost_bps": config["cost_bps_per_side"],
     })
     return candidate
 

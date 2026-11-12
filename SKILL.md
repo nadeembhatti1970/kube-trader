@@ -3,7 +3,7 @@
 ## Metadata
 
 - **Name:** `kube-trader-pipeline`
-- **Version:** 2.8.0
+- **Version:** 2.9.0
 - **Target:** Docker Compose or Kubernetes/Helm deployment
 - **Purpose:** Describe how the implemented data, signal, backtest, paper/live execution, allocation, reconciliation, and circuit-breaker workers operate.
 
@@ -39,7 +39,7 @@ Alpaca's `StockDataStream` supplies minute bars. The configured feed defaults to
 | `MAX_ENTRIES_PER_5MIN` | `3` | Rolling five-minute cap on new orders; `0` disables |
 | `INTRADAY_ENTRY_START_MINUTES` | `5` | Minutes after the open before intraday entries are allowed |
 | `INTRADAY_DAILY_LOSS_LIMIT_PCT` | `0.005` | Session realized-loss halt for new intraday entries |
-| `EXECUTION_LATENCY_WARN_SECONDS` | `30` | Signal-to-fill and reconciliation delay that triggers a warning log |
+| `EXECUTION_LATENCY_WARN_SECONDS` | `30` | Delay from the signal bar's close to the fill, and reconciliation delay, that triggers a warning log |
 | `RISK_VIEW_TTL_SECONDS` | `5` | Reuse one reconciliation across queued signals for this long |
 | `EXECUTION_MAX_WORKERS` | `4` | Concurrent signal handlers per Redis batch |
 | `ENTRY_ORDER_TYPE` | `market` | `market` or the opt-in `marketable_limit` entry |
@@ -117,7 +117,7 @@ The breaker does not terminate a pod, cancel bracket exits, or liquidate positio
 
 ## Signal throughput and order execution
 
-The execution worker keeps one broker reconciliation for `RISK_VIEW_TTL_SECONDS` rather than reconciling for every queued signal. Within a Redis batch it keeps only the newest event per symbol, acknowledges and discards older duplicates, sorts sells before buys, and runs up to `EXECUTION_MAX_WORKERS` handlers concurrently. Entry placement is serialized behind a lock so the burst cap (`MAX_ENTRIES_PER_5MIN`) and the summed open-stop-risk cap remain exact; exits are not serialized. A handler that raises does not acknowledge its message, so it is retried. Any reconciliation or signal slower than `EXECUTION_LATENCY_WARN_SECONDS` is logged.
+The execution worker keeps one broker reconciliation for `RISK_VIEW_TTL_SECONDS` rather than reconciling for every queued signal. Within a Redis batch it keeps only the newest event per symbol, acknowledges and discards older duplicates, sorts sells before buys, and runs up to `EXECUTION_MAX_WORKERS` handlers concurrently. Entry placement is serialized behind a lock so the burst cap (`MAX_ENTRIES_PER_5MIN`) and the summed open-stop-risk cap remain exact; exits are not serialized. A handler that raises does not acknowledge its message, so it is retried. Any reconciliation or signal slower than `EXECUTION_LATENCY_WARN_SECONDS` is logged. Reconciliation amortizes its two expensive parts: the session opening equity (one-minute portfolio history, 3–4s) is read once per session, and the account snapshot write (~1.6s) runs at most every 30s. Account, position, and order reads run in parallel; the realized-trade history behind the loss cooldowns is cached for 5s and asset fractionability per symbol. Reported latency is measured from the signal bar's close, not its open, using the `signal_bar_seconds` recorded on each order.
 
 Entries are market orders by default. `ENTRY_ORDER_TYPE=marketable_limit` sends a limit `ENTRY_LIMIT_OFFSET_BPS` through the reference price and waits `LIMIT_ORDER_TIMEOUT_SECONDS`; an unfilled order is cancelled and the unfilled quantity is sent as a market order. A partially filled order, or one whose cancellation cannot be confirmed, is left working instead of being replaced, so a position cannot be doubled. `MIN_ENTRY_BAR_COVERAGE_PCT` compares the symbol's stored session bars with the elapsed session and fails closed when the feed is thin.
 
@@ -129,7 +129,7 @@ Fractional sizing is enabled by `FRACTIONAL_SHARES_ENABLED`. Alpaca accepts frac
 
 Daily research runs the swing and core pools together from `daily_bars`: `/research/portfolio/daily` or `python -m app.services.backfill --timeframe day --days 1000` to seed the history first. Swing uses the close-vs-20-day-SMA state with a 2x ATR stop; core uses the 50/200-day cross with a 20% stop. Both share cash, pool budgets, concentration caps, and the open-risk cap, and the report reuses the same in-sample/out-of-sample split, bootstrap interval, and exposure-matched benchmark. Daily verdicts use the separate `daily-swing-core` namespace. `regime_filter=true` blocks new entries while the regime symbol (`SPY` by default) closed below its `regime_sma` on the prior session; open positions still follow their stops and trend exits. Entries below half their intended size are skipped so residual share counts do not consume slots and the run stays stable against small equity changes.
 
-Validation records carry a `scheme_version` (currently 3). The version is part of the hash and is stored, so a verdict produced under an older key set or an older definition of "validated" cannot satisfy the current gate.
+Validation records carry a `scheme_version` (currently 5). The version is part of the hash and is stored, so a verdict produced under an older key set or an older definition of "validated" cannot satisfy the current gate. The per-side cost assumption and the mandate are hashed too, so a verdict computed at one cost cannot satisfy a gate configured for another.
 
 With `REQUIRE_VALIDATED_STRATEGY=true`, new entries are blocked unless that record exists, which prevents risk from growing on an untested configuration. Validation is still evidence, not a guarantee.
 

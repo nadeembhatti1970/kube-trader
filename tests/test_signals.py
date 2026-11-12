@@ -132,5 +132,31 @@ class EntryConfirmedTests(unittest.TestCase):
         self.assertAlmostEqual(by_pool["core"]["slow_sma"], sum(closes[-200:]) / 200)
 
 
+class SignalBatchTests(unittest.TestCase):
+    def test_bars_are_grouped_by_symbol_in_arrival_order(self):
+        messages = [
+            ("1-0", {"data": '{"symbol": "AAPL", "ts": "t1"}'}),
+            ("2-0", {"data": '{"symbol": "MSFT", "ts": "t2"}'}),
+            ("3-0", {"data": '{"symbol": "AAPL", "ts": "t3"}'}),
+        ]
+        grouped = signals.group_by_symbol(messages)
+
+        self.assertEqual(list(grouped), ["AAPL", "MSFT"])
+        self.assertEqual([mid for mid, _ in grouped["AAPL"]], ["1-0", "3-0"])
+
+    def test_signals_carry_the_bar_length_for_latency_measurement(self):
+        bars = [{"time": f"2026-01-{i + 1:02d}", "close": 100.0 + i} for i in range(25)]
+        with patch.object(signals, "daily_bars_for_signal", return_value=bars), \
+                patch.object(signals, "daily_strategy_state", side_effect=[(False, True, 0.02),
+                                                                         (False, True, 0.0)]), \
+                patch.object(signals, "horizon_strategy_state", return_value=None), \
+                patch.object(signals, "save_horizon_strategy_state"):
+            events = signals.daily_signals("AAPL", bars[-1]["close"], "2026-11-05T15:00:00Z")
+
+        self.assertTrue(events)
+        for event in events:
+            self.assertEqual(event["signal_bar_seconds"], signals.SIGNAL_BAR_SECONDS)
+
+
 if __name__ == "__main__":
     unittest.main()

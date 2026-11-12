@@ -20,11 +20,13 @@ VALIDATION_KEYS = (
     "min_hold_minutes", "exit_confirmation_spread_pct", "exit_style",
     "trailing_stop_pct", "resample_minutes", "split_fraction",
     "premise", "opening_range_minutes", "gap_up_pct", "mandate",
+    "backtest_cost_bps",
 )
 Z_SCORES = {0.90: 1.645, 0.95: 1.960, 0.99: 2.576}
 # Bump when the key set or the meaning of a validated verdict changes. The version
 # is part of the hash and is stored, so older records cannot satisfy a newer gate.
-VALIDATION_SCHEME_VERSION = 4
+# 5 adds the cost assumption to the intraday key.
+VALIDATION_SCHEME_VERSION = 5
 MANDATES = ("relative", "absolute")
 # Live provenance records only execution settings, so simulator-only keys are
 # normalised here. Without this the live gate could never match a research verdict.

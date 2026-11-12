@@ -2,6 +2,8 @@ import json
 import logging
 import time
 import uuid
+from collections import defaultdict
+from concurrent.futures import ThreadPoolExecutor
 from datetime import date, datetime
 from zoneinfo import ZoneInfo
 
@@ -17,6 +19,11 @@ log = logging.getLogger("signals")
 settings = get_settings()
 NY = ZoneInfo("America/New_York")
 DAILY_CACHE: dict[str, dict] = {}
+# Signals are evaluated on completed one-minute bars, so the reference price is only
+# knowable one minute after the bar opens. Execution latency is measured from there.
+SIGNAL_BAR_SECONDS = 60
+# Symbols are evaluated concurrently because a minute of bars arrives in one batch.
+SIGNAL_WORKERS = 4
 
 
 def rsi(closes: list[float], period: int = 14) -> float:
@@ -149,6 +156,7 @@ def daily_signals(symbol: str, price: float, timestamp: str) -> list[dict]:
                 "pool": pool, "price": price, "stop_loss_pct": stop_loss_pct,
                 "daily_trend": "above" if current else "below",
                 "strategy_bar_date": bar_date.isoformat(), "ts": timestamp,
+                "signal_bar_seconds": SIGNAL_BAR_SECONDS,
                 **signal_values,
             })
         except (ValueError, IndexError):
@@ -160,6 +168,58 @@ def daily_signals(symbol: str, price: float, timestamp: str) -> list[dict]:
     return signals
 
 
+def process_bars(redis_client, symbol: str, messages: list[tuple[str, dict]]):
+    """Evaluate one symbol's bars in arrival order; other symbols run concurrently."""
+    for message_id, fields in messages:
+        try:
+            event = json.loads(fields["data"])
+            output_signals = []
+            closes = recent_closes(symbol, settings.signal_slow_bars + 1)
+            values = [float(row["close"]) for row in closes]
+            if len(values) >= settings.signal_slow_bars:
+                fast = sum(values[-settings.signal_fast_bars:]) / settings.signal_fast_bars
+                slow = sum(values[-settings.signal_slow_bars:]) / settings.signal_slow_bars
+                above = fast > slow
+                previous = strategy_is_above(symbol)
+                rsi_value = rsi(values)
+                # Leave the state unchanged for an unconfirmed buy so a later bar can confirm it.
+                if above and not previous and not entry_confirmed(fast, slow, rsi_value):
+                    above = previous
+                save_strategy_state(symbol, above)
+                if above != previous:
+                    action = "buy" if above else "sell"
+                    output_signals.append({
+                        "id": message_id, "symbol": symbol, "action": action,
+                        "pool": "intraday", "price": float(event["close"]),
+                        "stop_loss_pct": settings.stop_loss_pct,
+                        "take_profit_pct": settings.take_profit_pct,
+                        "fast_sma": fast, "slow_sma": slow,
+                        "rsi_14": rsi_value, "ts": event["ts"],
+                        "signal_bar_seconds": SIGNAL_BAR_SECONDS,
+                    })
+            output_signals.extend(daily_signals(
+                symbol, float(event["close"]), event["ts"]
+            ))
+            for signal in output_signals:
+                signal.setdefault("id", message_id)
+                publish(SIGNAL_STREAM, signal)
+            redis_client.xack(BAR_STREAM, "signal-workers", message_id)
+        except Exception:
+            log.exception("Unable to process bar event %s", message_id)
+
+
+def group_by_symbol(messages) -> dict[str, list[tuple[str, dict]]]:
+    """Keep each symbol's bars in order so state changes are applied in sequence."""
+    grouped: dict[str, list[tuple[str, dict]]] = defaultdict(list)
+    for message_id, fields in messages:
+        try:
+            symbol = json.loads(fields["data"])["symbol"]
+        except Exception:
+            symbol = ""
+        grouped[symbol].append((message_id, fields))
+    return grouped
+
+
 def main():
     init_db()
     redis_client = client()
@@ -167,43 +227,20 @@ def main():
     consumer = f"signals-{uuid.uuid4()}"
     while True:
         batches = read_group(redis_client, "signal-workers", consumer, BAR_STREAM,
-                             count=50, block=5000)
+                             count=50, block=1000)
         for _, messages in batches:
-            for message_id, fields in messages:
-                try:
-                    event = json.loads(fields["data"])
-                    output_signals = []
-                    closes = recent_closes(event["symbol"], settings.signal_slow_bars + 1)
-                    values = [float(row["close"]) for row in closes]
-                    if len(values) >= settings.signal_slow_bars:
-                        fast = sum(values[-settings.signal_fast_bars:]) / settings.signal_fast_bars
-                        slow = sum(values[-settings.signal_slow_bars:]) / settings.signal_slow_bars
-                        above = fast > slow
-                        previous = strategy_is_above(event["symbol"])
-                        rsi_value = rsi(values)
-                        # Leave the state unchanged for an unconfirmed buy so a later bar can confirm it.
-                        if above and not previous and not entry_confirmed(fast, slow, rsi_value):
-                            above = previous
-                        save_strategy_state(event["symbol"], above)
-                        if above != previous:
-                            action = "buy" if above else "sell"
-                            output_signals.append({
-                                "id": message_id, "symbol": event["symbol"], "action": action,
-                                "pool": "intraday", "price": float(event["close"]),
-                                "stop_loss_pct": settings.stop_loss_pct,
-                                "take_profit_pct": settings.take_profit_pct,
-                                "fast_sma": fast, "slow_sma": slow,
-                                "rsi_14": rsi_value, "ts": event["ts"],
-                            })
-                    output_signals.extend(daily_signals(
-                        event["symbol"], float(event["close"]), event["ts"]
-                    ))
-                    for signal in output_signals:
-                        signal.setdefault("id", message_id)
-                        publish(SIGNAL_STREAM, signal)
-                    redis_client.xack(BAR_STREAM, "signal-workers", message_id)
-                except Exception:
-                    log.exception("Unable to process bar event %s", message_id)
+            grouped = group_by_symbol(messages)
+            if len(grouped) <= 1:
+                for symbol, items in grouped.items():
+                    process_bars(redis_client, symbol, items)
+                continue
+            # A minute's worth of bars arrives at once; evaluating symbols serially
+            # puts the last symbols several seconds behind their own bar close.
+            with ThreadPoolExecutor(max_workers=SIGNAL_WORKERS) as pool:
+                futures = [pool.submit(process_bars, redis_client, symbol, items)
+                           for symbol, items in grouped.items()]
+                for future in futures:
+                    future.result()
 
 
 if __name__ == "__main__":

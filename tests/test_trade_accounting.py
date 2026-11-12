@@ -288,5 +288,39 @@ class TradeAttributionTests(unittest.TestCase):
         self.assertEqual(report["open_managed_quantities"][0]["pool"], "intraday")
 
 
+class SignalBarLatencyTests(unittest.TestCase):
+    def fills(self, bar_seconds):
+        start = datetime(2026, 11, 12, 15, 0, tzinfo=timezone.utc)
+        config = {"app_version": "0.1.46", "strategy": "sma-crossover-confirmed-v1"}
+        if bar_seconds is not None:
+            config = {**config, "signal_bar_seconds": bar_seconds}
+        common = {"symbol": "AAPL", "pool": "intraday", "fees": 0.0,
+                  "attribution_source": "managed_order_ledger"}
+        return [
+            {**common, "client_order_id": "entry", "broker_order_id": "entry-id",
+             "signal_id": "signal", "side": "buy", "filled_qty": 1,
+             "filled_avg_price": 100, "strategy_config": config,
+             "signal_timestamp": start,
+             "filled_at": start + timedelta(seconds=60 + 12)},
+            {**common, "client_order_id": "exit", "broker_order_id": "exit-id",
+             "signal_id": "signal-exit", "side": "sell", "filled_qty": 1,
+             "filled_avg_price": 101, "strategy_config": config,
+             "signal_timestamp": start + timedelta(minutes=5),
+             "filled_at": start + timedelta(minutes=5, seconds=70)},
+        ]
+
+    def test_latency_is_measured_from_the_bar_close(self):
+        trade = build_realized_trade_report(self.fills(60))["trades"][0]
+
+        self.assertAlmostEqual(trade["entry_signal_to_fill_seconds"], 12.0)
+        self.assertEqual(trade["entry_signal_bar_seconds"], 60.0)
+
+    def test_legacy_orders_without_a_bar_duration_keep_the_open_basis(self):
+        trade = build_realized_trade_report(self.fills(None))["trades"][0]
+
+        self.assertAlmostEqual(trade["entry_signal_to_fill_seconds"], 72.0)
+        self.assertEqual(trade["entry_signal_bar_seconds"], 0.0)
+
+
 if __name__ == "__main__":
     unittest.main()
