@@ -1,9 +1,31 @@
+import threading
 from datetime import date, datetime, timedelta, timezone
 
 import finnhub
 import yfinance as yf
 
 from app.settings import Settings
+
+# yfinance keeps module-level state (its session and timezone cache), so concurrent
+# downloads can return frames with duplicated column labels. Serialize the call; a
+# symbol's daily bars are fetched once per session anyway.
+YFINANCE_LOCK = threading.Lock()
+
+
+def _frame_rows(frame, days: int) -> list[dict]:
+    """Convert a yfinance frame to bar dicts, tolerating duplicated column labels."""
+    if frame.empty:
+        raise ValueError("No market data returned")
+    if getattr(frame.columns, "nlevels", 1) > 1:
+        frame = frame.copy()
+        frame.columns = frame.columns.get_level_values(0)
+    frame = frame.loc[:, ~frame.columns.duplicated()]
+    return [
+        {"time": index.date().isoformat(), "open": float(row["Open"]),
+         "high": float(row["High"]), "low": float(row["Low"]),
+         "close": float(row["Close"]), "volume": int(row["Volume"])}
+        for index, row in frame.tail(days).iterrows()
+    ]
 
 
 def get_daily_bars(symbol: str, days: int, settings: Settings) -> list[dict]:
@@ -28,18 +50,12 @@ def get_daily_bars(symbol: str, days: int, settings: Settings) -> list[dict]:
         ]
     elif settings.market_data_provider.lower() == "yfinance":
         provider_symbol = symbol.replace(".", "-")
-        frame = yf.download(provider_symbol, start=start.isoformat(), end=end.isoformat(),
-                            progress=False, auto_adjust=True, threads=False)
+        with YFINANCE_LOCK:
+            frame = yf.download(provider_symbol, start=start.isoformat(), end=end.isoformat(),
+                                progress=False, auto_adjust=True, threads=False)
         if frame.empty:
             raise ValueError(f"No market data returned for {symbol}")
-        if getattr(frame.columns, "nlevels", 1) > 1:
-            frame.columns = frame.columns.get_level_values(0)
-        rows = [
-            {"time": index.date().isoformat(), "open": float(row["Open"]),
-             "high": float(row["High"]), "low": float(row["Low"]),
-             "close": float(row["Close"]), "volume": int(row["Volume"])}
-            for index, row in frame.tail(days).iterrows()
-        ]
+        rows = _frame_rows(frame, days)
     else:
         raise ValueError("MARKET_DATA_PROVIDER must be 'yfinance' or 'finnhub'")
     return rows[-days:]

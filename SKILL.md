@@ -121,7 +121,7 @@ The execution worker keeps one broker reconciliation for `RISK_VIEW_TTL_SECONDS`
 
 Entries are market orders by default. `ENTRY_ORDER_TYPE=marketable_limit` sends a limit `ENTRY_LIMIT_OFFSET_BPS` through the reference price and waits `LIMIT_ORDER_TIMEOUT_SECONDS`; an unfilled order is cancelled and the unfilled quantity is sent as a market order. A partially filled order, or one whose cancellation cannot be confirmed, is left working instead of being replaced, so a position cannot be doubled. `MIN_ENTRY_BAR_COVERAGE_PCT` compares the symbol's stored session bars with the elapsed session and fails closed when the feed is thin.
 
-Fractional sizing is enabled by `FRACTIONAL_SHARES_ENABLED`. Alpaca accepts fractional quantities only on simple market, limit, stop, and stop-limit orders with a day time in force, so fractional intraday entries are simple day orders: the protective stop is a separate fractional day stop submitted after the entry reports a fill, and the take-profit is checked against the recorded target on each reconciliation cycle. Whole-share intraday entries retain the atomic day bracket. Swing and core orders stay whole-share because their protective stops must remain GTC OTO orders. Research simulators use fractional quantities by default, which keeps every cap proportional to capital and makes percentage results independent of the account equity.
+Fractional sizing is enabled by `FRACTIONAL_SHARES_ENABLED`. Alpaca accepts fractional quantities only on simple market, limit, stop, and stop-limit orders with a day time in force, so fractional intraday entries are simple day orders: the protective stop is a separate fractional day stop submitted after the entry reports a fill, and the take-profit is checked against the recorded target on each reconciliation cycle. If the entry is only partially filled when the stop is due, the unfilled remainder is cancelled first, because a live buy makes Alpaca reject the sell stop as a potential wash trade; a rejection is retried twice at one-second intervals before falling back to reconciliation repair. Whole-share intraday entries retain the atomic day bracket. Swing and core orders stay whole-share because their protective stops must remain GTC OTO orders. Research simulators use fractional quantities by default, which keeps every cap proportional to capital and makes percentage results independent of the account equity.
 
 ## Strategy validation
 
@@ -133,7 +133,7 @@ Validation records carry a `scheme_version` (currently 5). The version is part o
 
 With `REQUIRE_VALIDATED_STRATEGY=true`, new entries are blocked unless that record exists, which prevents risk from growing on an untested configuration. Validation is still evidence, not a guarantee.
 
-`python -m app.services.research_grid` runs the same matrix in-process against stored bars, ranks variants by out-of-sample gross edge, and promotes only those whose out-of-sample interval clears zero. `--persist` stores each verdict; it never publishes to Redis or places orders.
+`python -m app.services.research_grid` runs the same matrix in-process against stored bars, ranks variants by out-of-sample gross edge, and promotes only those whose out-of-sample interval clears zero. `--persist` stores each verdict; it never publishes to Redis or places orders. `--entry-cutoffs` (minutes before the close) tests an intraday entry window, e.g. `30,240` compares the current 15:30 ET cutoff with noon.
 
 ## Operational endpoints and deployment
 

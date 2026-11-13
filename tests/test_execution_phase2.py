@@ -3,6 +3,8 @@ from datetime import datetime, timezone
 from types import SimpleNamespace
 from unittest.mock import patch
 
+from alpaca.common.exceptions import APIError
+
 from app.services import execution
 
 
@@ -391,6 +393,60 @@ class FractionalExecutionTests(unittest.TestCase):
         self.assertEqual(stop.time_in_force.value, "day")
         self.assertAlmostEqual(float(stop.qty), 2.5)
         self.assertAlmostEqual(float(stop.stop_price), 98.0)
+
+    def test_wash_trade_rejection_is_retried(self):
+        class RetryClient:
+            def __init__(self):
+                self.attempts = 0
+
+            def get_order_by_id(self, order_id):
+                return SimpleNamespace(id=order_id, status="filled", filled_qty="2.5")
+
+            def submit_order(self, request):
+                self.attempts += 1
+                if self.attempts == 1:
+                    raise APIError({"code": 40310000, "message": (
+                        "potential wash trade detected. use complex orders")})
+                return SimpleNamespace(id="stop-1", status="new")
+
+        client = RetryClient()
+        with patch("app.services.execution.time.monotonic", side_effect=[0, 0]), \
+                patch("app.services.execution.time.sleep"), \
+                self.assertLogs("execution", level="INFO") as captured:
+            execution.ensure_fractional_stop(
+                client, SimpleNamespace(id="entry-1"), "AAPL", 98.0)
+
+        self.assertEqual(client.attempts, 2)
+        self.assertIn("competing with the entry order", "".join(captured.output))
+
+    def test_partially_filled_entry_is_cancelled_before_the_stop(self):
+        class PartialClient:
+            def __init__(self):
+                self.cancelled = []
+                self.requests = []
+
+            def get_order_by_id(self, order_id):
+                return SimpleNamespace(id=order_id, status="partially_filled",
+                                       filled_qty="1.24")
+
+            def cancel_order_by_id(self, order_id):
+                self.cancelled.append(order_id)
+
+            def submit_order(self, request):
+                self.requests.append(request)
+                return SimpleNamespace(id="stop-1", status="new")
+
+        client = PartialClient()
+        with patch("app.services.execution.time.monotonic",
+                   side_effect=[0, 0, 0, 11]), \
+                patch("app.services.execution.time.sleep"), \
+                self.assertLogs("execution", level="WARNING"):
+            execution.ensure_fractional_stop(
+                client, SimpleNamespace(id="entry-1"), "AAPL", 98.0)
+
+        self.assertEqual(client.cancelled, ["entry-1"])
+        self.assertEqual(len(client.requests), 1)
+        self.assertAlmostEqual(float(client.requests[0].qty), 1.24)
 
     def test_software_take_profit_closes_only_at_or_above_target(self):
         position = SimpleNamespace(symbol="AAPL", current_price="105.0")

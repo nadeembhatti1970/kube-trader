@@ -49,21 +49,26 @@ def _fast_slows(value: str) -> list[tuple[int, int]]:
 def build_variants(spreads: list[float], rsis: list[float],
                    fast_slows: list[tuple[int, int]],
                    exit_styles: list[str],
-                   premises: list[str] | None = None) -> list[dict]:
+                   premises: list[str] | None = None,
+                   entry_cutoffs: list[int] | None = None) -> list[dict]:
     variants = []
     for premise in premises or ["sma_crossover"]:
         for spread in spreads:
             for rsi in rsis:
                 for fast, slow in fast_slows:
                     for style in exit_styles:
-                        variants.append({
-                            "min_spread_pct": spread,
-                            "min_buy_rsi": rsi,
-                            "fast_bars": fast,
-                            "slow_bars": slow,
-                            "exit_style": style,
-                            "premise": premise,
-                        })
+                        for cutoff in entry_cutoffs or [None]:
+                            variant = {
+                                "min_spread_pct": spread,
+                                "min_buy_rsi": rsi,
+                                "fast_bars": fast,
+                                "slow_bars": slow,
+                                "exit_style": style,
+                                "premise": premise,
+                            }
+                            if cutoff is not None:
+                                variant["intraday_entry_cutoff_minutes"] = cutoff
+                            variants.append(variant)
     return variants
 
 
@@ -71,8 +76,10 @@ def variant_label(variant: dict) -> str:
     suffix = "" if variant["exit_style"] == "signal" else f"|{variant['exit_style']}"
     premise = variant.get("premise", "sma_crossover")
     prefix = "" if premise == "sma_crossover" else f"{premise}|"
+    cutoff = variant.get("intraday_entry_cutoff_minutes")
+    cutoff_note = f" cut{cutoff}" if cutoff is not None else ""
     return (f"{prefix}{variant['fast_bars']}/{variant['slow_bars']} "
-            f"s{variant['min_spread_pct']:g} r{variant['min_buy_rsi']:g}{suffix}")
+            f"s{variant['min_spread_pct']:g} r{variant['min_buy_rsi']:g}{suffix}{cutoff_note}")
 
 
 def _candidate_config(config: dict) -> dict:
@@ -93,6 +100,9 @@ def _candidate_config(config: dict) -> dict:
         "gap_up_pct": config.get("gap_up_pct", 0.005),
         "mandate": config.get("mandate", "relative"),
         "backtest_cost_bps": config["cost_bps_per_side"],
+        "intraday_entry_cutoff_minutes": config.get("intraday_entry_cutoff_minutes"),
+        "intraday_entry_start_minutes": config.get("intraday_entry_start_minutes"),
+        "intraday_flatten_minutes": config.get("intraday_flatten_minutes"),
     })
     return candidate
 
@@ -295,6 +305,9 @@ def main():
     parser.add_argument("--premises", default="sma_crossover",
                         help="Comma-separated sma_crossover, opening_range_breakout, "
                              "gap_up; spread and RSI apply only to the SMA premise")
+    parser.add_argument("--entry-cutoffs", default=None,
+                        help="Comma-separated minutes before the close after which no "
+                             "new intraday entry is allowed, e.g. 240 stops at 12:00 ET")
     parser.add_argument("--regime-smas", default="50,100,200",
                         help="Daily mode: moving-average periods for the regime filter")
     parser.add_argument("--regime-symbol", default="SPY",
@@ -397,6 +410,7 @@ def main():
             _fast_slows(args.fast_slows),
             [item.strip() for item in args.exit_styles.split(",") if item.strip()],
             [item.strip() for item in args.premises.split(",") if item.strip()],
+            _ints(args.entry_cutoffs) if args.entry_cutoffs else None,
         )
         sectors = {symbol: sector_for_symbol(symbol, settings)
                    for symbol in bars_by_symbol}

@@ -1099,7 +1099,7 @@ def ensure_fractional_stop(client_api: TradingClient, order, symbol: str,
             log.exception("Unable to poll fractional entry %s for %s", order.id, symbol)
             break
         status = order_status(current)
-        if status in {"filled", "partially_filled"}:
+        if status == "filled":
             break
         if status in {"canceled", "expired", "rejected"}:
             return
@@ -1110,19 +1110,48 @@ def ensure_fractional_stop(client_api: TradingClient, order, symbol: str,
             "Fractional entry %s for %s has no fill yet; reconciliation will "
             "submit the protective stop", order.id, symbol)
         return
+    if order_status(current) not in {"filled", "canceled", "expired", "rejected"}:
+        # A partially filled entry still has a live buy, and Alpaca rejects the sell
+        # stop as a potential wash trade while it exists. Cancel the remainder so the
+        # stop can go in for the shares that did fill.
+        try:
+            client_api.cancel_order_by_id(order.id)
+            log.warning(
+                "Cancelled the unfilled remainder of fractional entry %s for %s",
+                order.id, symbol)
+        except Exception:
+            log.exception(
+                "Unable to cancel the remainder of fractional entry %s for %s",
+                order.id, symbol)
     stop_qty = round(filled, settings.fractional_qty_decimals)
-    try:
-        client_api.submit_order(StopOrderRequest(
-            symbol=symbol, qty=stop_qty, side=OrderSide.SELL, type=OrderType.STOP,
-            time_in_force=TimeInForce.DAY, stop_price=stop_price,
-            client_order_id="kt-protect-" + uuid.uuid4().hex[:24],
-        ))
-        log.warning("Submitted fractional day stop for %s qty=%s at %s",
-                    symbol, stop_qty, stop_price)
-    except Exception:
-        log.exception(
-            "Unable to submit the fractional stop for %s; reconciliation will retry",
-            symbol)
+    for attempt in range(3):
+        try:
+            client_api.submit_order(StopOrderRequest(
+                symbol=symbol, qty=stop_qty, side=OrderSide.SELL, type=OrderType.STOP,
+                time_in_force=TimeInForce.DAY, stop_price=stop_price,
+                client_order_id="kt-protect-" + uuid.uuid4().hex[:24],
+            ))
+            log.warning("Submitted fractional day stop for %s qty=%s at %s",
+                        symbol, stop_qty, stop_price)
+            return
+        except APIError as exc:
+            message = str(exc).lower()
+            transient = "wash trade" in message or "opposite side" in message
+            if transient and attempt < 2:
+                log.info(
+                    "Stop for %s is still competing with the entry order; retrying",
+                    symbol)
+                time.sleep(1.0)
+                continue
+            log.error(
+                "Unable to submit the fractional stop for %s: %s; reconciliation "
+                "will retry", symbol, exc)
+            return
+        except Exception:
+            log.exception(
+                "Unable to submit the fractional stop for %s; reconciliation will retry",
+                symbol)
+            return
 
 
 def check_software_take_profits(client_api: TradingClient, positions) -> list[str]:
