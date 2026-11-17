@@ -89,7 +89,7 @@ spec:
     spec:
       containers:
         - name: redis
-          image: redis:7-alpine
+          image: redis:8-alpine
           args: [redis-server, --appendonly, "yes"]
           ports:
             - containerPort: 6379
