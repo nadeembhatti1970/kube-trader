@@ -45,6 +45,17 @@ class VariantTests(unittest.TestCase):
         self.assertEqual([item["premise"] for item in variants],
                          ["sma_crossover", "opening_range_breakout", "gap_up"])
 
+    def test_regime_smas_expand_the_matrix_and_label(self):
+        variants = research_grid.build_variants(
+            [0.001], [65.0], [(5, 20)], ["signal"],
+            ["sma_crossover"], None, [0, 100])
+        self.assertEqual(len(variants), 2)
+        self.assertFalse(variants[0]["regime_filter_enabled"])
+        self.assertTrue(variants[1]["regime_filter_enabled"])
+        self.assertEqual(variants[1]["regime_sma"], 100)
+        self.assertTrue(research_grid.variant_label(variants[1]).endswith("reg100"))
+        self.assertNotIn("reg", research_grid.variant_label(variants[0]))
+
     def test_label_carries_the_premise(self):
         label = research_grid.variant_label({
             "fast_bars": 5, "slow_bars": 20, "min_spread_pct": 0.001,

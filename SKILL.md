@@ -38,7 +38,7 @@ Alpaca's `StockDataStream` supplies minute bars. The configured feed defaults to
 | `MIN_ENTRY_NOTIONAL` | `100` | Skip entries below this notional; residual sizes under half the intended quantity are also skipped |
 | `MAX_ENTRIES_PER_5MIN` | `3` | Rolling five-minute cap on new orders; `0` disables |
 | `INTRADAY_ENTRY_START_MINUTES` | `5` | Minutes after the open before intraday entries are allowed |
-| `INTRADAY_DAILY_LOSS_LIMIT_PCT` | `0.005` | Session realized-loss halt for new intraday entries |
+| `INTRADAY_DAILY_LOSS_LIMIT_PCT` | `0.0025` | Session realized-loss halt for new intraday entries |
 | `EXECUTION_LATENCY_WARN_SECONDS` | `30` | Delay from the signal bar's close to the fill, and reconciliation delay, that triggers a warning log |
 | `RISK_VIEW_TTL_SECONDS` | `5` | Reuse one reconciliation across queued signals for this long |
 | `EXECUTION_MAX_WORKERS` | `4` | Concurrent signal handlers per Redis batch |
@@ -103,7 +103,7 @@ Each pool's target equity is `account_equity * target_ratio`. Broker position ma
 
 Entries are also gated by `MAX_ENTRIES_PER_5MIN` (rolling burst cap), `INTRADAY_ENTRY_START_MINUTES`, `INTRADAY_ENTRY_CUTOFF_MINUTES`, and `INTRADAY_DAILY_LOSS_LIMIT_PCT`. The last one pauses intraday entries for the session once that pool's realized loss reaches the configured share of equity; the account-wide `DAILY_DRAWDOWN_LIMIT_PCT` breaker is unchanged. Two size floors then apply: an entry is skipped when the computed quantity is below half the intended size (the minimum of the risk budget, the symbol cap, and the 100-share ceiling), and when its notional is below `MIN_ENTRY_NOTIONAL`. Both reject residual slices that would occupy a position slot and a protective order for a fraction of the risk budget.
 
-All three pools generate signals. Intraday entries use day bracket orders with default 2% stop and 4% take-profit. Swing and core entries use GTC OTO orders with a single protective stop and no fixed take-profit; their daily trend exits close the bot-managed pool position after canceling its attached exit order. The 20/30/50 pool balances are virtual limits inside one brokerage account: the application does not transfer cash between accounts or automatically sell holdings to rebalance pool ratios.
+All three pools generate signals. Intraday entries use day bracket orders with default 2% stop and 4% take-profit. Swing and core entries use GTC OTO orders with a single protective stop and no fixed take-profit; their daily trend exits close the bot-managed pool position after canceling its attached exit order. The 10/30/60 pool balances are virtual limits inside one brokerage account: the application does not transfer cash between accounts or automatically sell holdings to rebalance pool ratios.
 
 Intraday buy signals submit long-only Alpaca market bracket orders on the selected endpoint, with stop-loss and take-profit child orders. Swing/core buys submit GTC OTO market orders with one protective stop and no fixed take-profit. The execution worker ignores stale/future signals and will not enter when the US equity market is closed. A matching pool's trend exit cancels its open protective closing leg and closes the bot-managed position. The daily breaker blocks new entries but still allows strategy exits.
 
@@ -133,7 +133,7 @@ Validation records carry a `scheme_version` (currently 5). The version is part o
 
 With `REQUIRE_VALIDATED_STRATEGY=true`, new entries are blocked unless that record exists, which prevents risk from growing on an untested configuration. Validation is still evidence, not a guarantee.
 
-`python -m app.services.research_grid` runs the same matrix in-process against stored bars, ranks variants by out-of-sample gross edge, and promotes only those whose out-of-sample interval clears zero. `--persist` stores each verdict; it never publishes to Redis or places orders. `--entry-cutoffs` (minutes before the close) tests an intraday entry window, e.g. `30,240` compares the current 15:30 ET cutoff with noon.
+`python -m app.services.research_grid` runs the same matrix in-process against stored bars, ranks variants by out-of-sample gross edge, and promotes only those whose out-of-sample interval clears zero. `--persist` stores each verdict; it never publishes to Redis or places orders. `--entry-cutoffs` (minutes before the close) tests an intraday entry window, e.g. `30,240` compares the current 15:30 ET cutoff with noon, and `--regime-smas` adds gated intraday variants that block entries while the regime symbol's prior close is below its moving average (`0` is the ungated baseline).
 
 ## Operational endpoints and deployment
 

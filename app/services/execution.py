@@ -46,7 +46,7 @@ logging.basicConfig(level=logging.INFO)
 log = logging.getLogger("execution")
 settings = get_settings()
 NY = ZoneInfo("America/New_York")
-POOL_WEIGHTS = {"intraday": 0.20, "swing": 0.30, "core": 0.50}
+POOL_WEIGHTS = {"intraday": 0.10, "swing": 0.30, "core": 0.60}
 RISK_VIEW_LOCK = threading.Lock()
 RISK_VIEW = {"value": None, "captured_at": 0.0}
 # Session opening equity from a one-minute portfolio history (~3.5s); fixed per session.

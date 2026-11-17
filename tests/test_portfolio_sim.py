@@ -1,6 +1,7 @@
 import unittest
 from datetime import datetime, timedelta, timezone
 
+from app import portfolio_sim
 from app.portfolio_sim import simulate_portfolio
 from app.validation import (
     block_bootstrap_ci,
@@ -387,3 +388,63 @@ class SignificanceTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+def daily_regime(closes, last_day="2026-11-05"):
+    """Daily bars ending the session before START, one per consecutive day."""
+    end = datetime.fromisoformat(last_day)
+    return [
+        {"time": (end - timedelta(days=len(closes) - 1 - index)).date().isoformat(),
+         "close": close}
+        for index, close in enumerate(closes)
+    ]
+
+
+class RegimeFilterTests(unittest.TestCase):
+    def run_sim(self, regime_closes, **overrides):
+        config = {**BASE, "regime_filter_enabled": True, "regime_sma": 5, **overrides}
+        return simulate_portfolio(
+            {"AAPL": bars_from(breakout_path())}, config,
+            regime_bars=daily_regime(regime_closes))
+
+    def test_risk_on_regime_allows_the_entry(self):
+        result = self.run_sim([90.0, 90.0, 90.0, 90.0, 110.0])
+        self.assertEqual(result["metrics"]["closed_trades"], 1)
+
+    def test_risk_off_regime_blocks_the_entry(self):
+        result = self.run_sim([110.0, 110.0, 110.0, 110.0, 100.0])
+        self.assertEqual(result["metrics"]["closed_trades"], 0)
+
+    def test_uses_the_prior_completed_day_not_the_current_one(self):
+        # The last stored bar is the session being traded; it must be ignored.
+        regime = daily_regime([90.0, 90.0, 90.0, 90.0, 90.0])
+        regime[-1] = {"time": "2026-11-06", "close": 999.0}
+        result = simulate_portfolio(
+            {"AAPL": bars_from(breakout_path())},
+            {**BASE, "regime_filter_enabled": True, "regime_sma": 5},
+            regime_bars=regime)
+        self.assertEqual(result["metrics"]["closed_trades"], 0)
+
+    def test_missing_regime_history_fails_closed(self):
+        result = simulate_portfolio(
+            {"AAPL": bars_from(breakout_path())},
+            {**BASE, "regime_filter_enabled": True, "regime_sma": 5},
+            regime_bars=None)
+        self.assertEqual(result["metrics"]["closed_trades"], 0)
+
+    def test_lookup_reports_above_and_below(self):
+        days, above = portfolio_sim._regime_lookup(
+            [{"time": "2026-11-03", "close": 100.0},
+             {"time": "2026-11-04", "close": 110.0},
+             {"time": "2026-11-05", "close": 105.0}], 2)
+        self.assertEqual([item.isoformat() for item in days],
+                         ["2026-11-03", "2026-11-04", "2026-11-05"])
+        self.assertIsNone(above[0])
+        self.assertTrue(above[1])    # 110 > mean(100, 110)
+        self.assertFalse(above[2])   # 105 < mean(110, 105)
+        # A session uses the observation before it.
+        self.assertTrue(portfolio_sim._regime_allows(
+            days, above, datetime(2026, 11, 5).date()))
+        self.assertFalse(portfolio_sim._regime_allows(
+            days, above, datetime(2026, 11, 6).date()))
+        self.assertFalse(portfolio_sim._regime_allows(
+            days, above, datetime(2026, 11, 3).date()))

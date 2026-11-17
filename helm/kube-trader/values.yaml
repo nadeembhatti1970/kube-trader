@@ -30,7 +30,7 @@ config:
   intradayFlattenMinutes: "10"
   intradayEntryCutoffMinutes: "30"
   intradayEntryStartMinutes: "5"
-  intradayDailyLossLimitPct: "0.005"
+  intradayDailyLossLimitPct: "0.0025"
   maxEntriesPer5min: "3"
   minEntryNotional: "100"
   maxPortfolioOpenRiskPct: "0.02"
@@ -41,9 +41,9 @@ config:
   dailyDrawdownLimitPct: "0.03"
   stopLossPct: "0.02"
   takeProfitPct: "0.04"
-  intradayAllocationPct: "0.20"
+  intradayAllocationPct: "0.10"
   swingAllocationPct: "0.30"
-  coreAllocationPct: "0.50"
+  coreAllocationPct: "0.60"
   # Paper deployment: hold 30% of equity in a passive SPY sleeve and block new
   # daily buys while SPY is below its 100-day SMA.
   coreIndexEnabled: "true"

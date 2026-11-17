@@ -7,6 +7,7 @@ open-risk cap, entry window/cutoff, end-of-day flattening, per-side costs) to al
 watchlist symbols at once, and reports the uncertainty around the result.
 """
 import math
+from bisect import bisect_left
 from collections import defaultdict
 from datetime import date, datetime, timezone
 from zoneinfo import ZoneInfo
@@ -15,12 +16,12 @@ from app.services.signals import rsi
 from app.validation import significance_summary
 
 NY = ZoneInfo("America/New_York")
-POOL_WEIGHTS = {"intraday": 0.20, "swing": 0.30, "core": 0.50}
+POOL_WEIGHTS = {"intraday": 0.10, "swing": 0.30, "core": 0.60}
 PERIODS_PER_YEAR = 390 * 252
 
 DEFAULT_CONFIG = {
     "pool": "intraday",
-    "intraday_allocation_pct": 0.20,
+    "intraday_allocation_pct": 0.10,
     "fast_bars": 5,
     "slow_bars": 20,
     "min_spread_pct": 0.001,
@@ -51,6 +52,10 @@ DEFAULT_CONFIG = {
     "premise": "sma_crossover",
     "opening_range_minutes": 15,
     "gap_up_pct": 0.005,
+    # Block new entries while the regime symbol's prior completed daily close is
+    # at or below its moving average, mirroring the live daily-sleeve filter.
+    "regime_filter_enabled": False,
+    "regime_sma": 200,
     # Chronological in-sample share of the window; the remainder is out-of-sample.
     "split_fraction": 0.7,
 }
@@ -69,6 +74,33 @@ def _as_datetime(value) -> datetime:
 def _minutes_to_close(moment: datetime) -> float:
     local = moment.astimezone(NY)
     return 16 * 60 - (local.hour * 60 + local.minute)
+
+
+def _regime_lookup(bars: list[dict] | None, period: int):
+    """Prior-close regime observations from daily bars, aligned to their dates."""
+    if not bars or period <= 0:
+        return [], []
+    normalized = sorted((bar["time"], float(bar["close"])) for bar in bars)
+    days = [date.fromisoformat(day) for day, _ in normalized]
+    closes = [close for _, close in normalized]
+    above: list[bool | None] = []
+    for index, close in enumerate(closes):
+        if index + 1 < period:
+            above.append(None)
+        else:
+            window = closes[index - period + 1:index + 1]
+            above.append(close > sum(window) / period)
+    return days, above
+
+
+def _regime_allows(days: list[date], above: list[bool | None], day: date) -> bool:
+    """Use the latest observation strictly before the session being traded; fail closed."""
+    if not days:
+        return False
+    index = bisect_left(days, day) - 1
+    if index < 0 or above[index] is None:
+        return False
+    return bool(above[index])
 
 
 def _minutes_since_open(moment: datetime) -> float:
@@ -261,7 +293,8 @@ def _trade_summary(trades: list[dict]) -> dict:
 
 def simulate_portfolio(bars_by_symbol: dict[str, list[dict]], config: dict | None = None,
                        sectors: dict[str, str] | None = None,
-                       validation: dict | None = None) -> dict:
+                       validation: dict | None = None,
+                       regime_bars: list[dict] | None = None) -> dict:
     """Run one portfolio simulation over every supplied symbol.
 
     Signals are evaluated on bar closes, entries and signal exits fill at the next
@@ -286,6 +319,9 @@ def simulate_portfolio(bars_by_symbol: dict[str, list[dict]], config: dict | Non
         raise ValueError("trailing_stop_pct cannot be negative")
     if exit_style == "trailing" and float(effective["trailing_stop_pct"]) <= 0:
         raise ValueError("trailing exit_style requires trailing_stop_pct > 0")
+    regime_enabled = bool(effective["regime_filter_enabled"])
+    regime_days, regime_above = _regime_lookup(
+        regime_bars, int(effective["regime_sma"])) if regime_enabled else ([], [])
     premise = str(effective["premise"])
     if premise not in {"sma_crossover", "opening_range_breakout", "gap_up"}:
         raise ValueError("premise must be sma_crossover, opening_range_breakout, or gap_up")
@@ -441,6 +477,9 @@ def simulate_portfolio(bars_by_symbol: dict[str, list[dict]], config: dict | Non
                 continue
             if remaining <= max(float(effective["intraday_entry_cutoff_minutes"]),
                                 float(effective["intraday_flatten_minutes"])):
+                continue
+            if regime_enabled and not _regime_allows(
+                    regime_days, regime_above, moment.date()):
                 continue
             if len(positions) >= int(effective["max_open_positions"]):
                 continue

@@ -28,7 +28,7 @@ class Settings(BaseSettings):
     intraday_flatten_minutes: int = 0
     intraday_entry_cutoff_minutes: int = 0
     intraday_entry_start_minutes: int = 5
-    intraday_daily_loss_limit_pct: float = 0.005
+    intraday_daily_loss_limit_pct: float = 0.0025
     symbol_loss_cooldown_seconds: int = 0
     symbol_daily_loss_limit: float = 0.0
     max_entries_per_5min: int = 3
@@ -44,9 +44,9 @@ class Settings(BaseSettings):
     daily_drawdown_limit_pct: float = 0.03
     stop_loss_pct: float = 0.02
     take_profit_pct: float = 0.04
-    intraday_allocation_pct: float = 0.20
+    intraday_allocation_pct: float = 0.10
     swing_allocation_pct: float = 0.30
-    core_allocation_pct: float = 0.50
+    core_allocation_pct: float = 0.60
     core_index_enabled: bool = False
     core_index_symbol: str = "SPY"
     core_index_pct: float = 0.0
@@ -133,9 +133,10 @@ def strategy_config(settings: Settings | None = None, event: dict | None = None)
         "fractional_shares_enabled": current.fractional_shares_enabled,
         "fractional_qty_decimals": current.fractional_qty_decimals,
         "mandate": current.validation_mandate,
-        # Cost assumptions are part of the strategy's economics, so a verdict
-        # computed at one cost cannot satisfy a gate configured for another.
+        # Cost assumptions and sleeve size are part of the strategy's economics,
+        # so a verdict computed for one cannot satisfy a gate configured for another.
         "backtest_cost_bps": current.backtest_cost_bps,
+        "intraday_allocation_pct": current.intraday_allocation_pct,
         "risk_controls": {
             "configured_max_trade_risk_pct": current.max_trade_risk_pct,
             "effective_max_trade_risk_pct": min(current.max_trade_risk_pct, 0.01),

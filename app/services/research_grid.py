@@ -50,7 +50,8 @@ def build_variants(spreads: list[float], rsis: list[float],
                    fast_slows: list[tuple[int, int]],
                    exit_styles: list[str],
                    premises: list[str] | None = None,
-                   entry_cutoffs: list[int] | None = None) -> list[dict]:
+                   entry_cutoffs: list[int] | None = None,
+                   regime_smas: list[int] | None = None) -> list[dict]:
     variants = []
     for premise in premises or ["sma_crossover"]:
         for spread in spreads:
@@ -58,17 +59,21 @@ def build_variants(spreads: list[float], rsis: list[float],
                 for fast, slow in fast_slows:
                     for style in exit_styles:
                         for cutoff in entry_cutoffs or [None]:
-                            variant = {
-                                "min_spread_pct": spread,
-                                "min_buy_rsi": rsi,
-                                "fast_bars": fast,
-                                "slow_bars": slow,
-                                "exit_style": style,
-                                "premise": premise,
-                            }
-                            if cutoff is not None:
-                                variant["intraday_entry_cutoff_minutes"] = cutoff
-                            variants.append(variant)
+                            for regime_sma in regime_smas or [None]:
+                                variant = {
+                                    "min_spread_pct": spread,
+                                    "min_buy_rsi": rsi,
+                                    "fast_bars": fast,
+                                    "slow_bars": slow,
+                                    "exit_style": style,
+                                    "premise": premise,
+                                }
+                                if cutoff is not None:
+                                    variant["intraday_entry_cutoff_minutes"] = cutoff
+                                if regime_sma is not None:
+                                    variant["regime_filter_enabled"] = regime_sma > 0
+                                    variant["regime_sma"] = max(regime_sma, 1)
+                                variants.append(variant)
     return variants
 
 
@@ -78,8 +83,12 @@ def variant_label(variant: dict) -> str:
     prefix = "" if premise == "sma_crossover" else f"{premise}|"
     cutoff = variant.get("intraday_entry_cutoff_minutes")
     cutoff_note = f" cut{cutoff}" if cutoff is not None else ""
+    regime_note = ""
+    if variant.get("regime_filter_enabled"):
+        regime_note = f" reg{variant.get('regime_sma')}"
     return (f"{prefix}{variant['fast_bars']}/{variant['slow_bars']} "
-            f"s{variant['min_spread_pct']:g} r{variant['min_buy_rsi']:g}{suffix}{cutoff_note}")
+            f"s{variant['min_spread_pct']:g} r{variant['min_buy_rsi']:g}{suffix}"
+            f"{cutoff_note}{regime_note}")
 
 
 def _candidate_config(config: dict) -> dict:
@@ -103,6 +112,8 @@ def _candidate_config(config: dict) -> dict:
         "intraday_entry_cutoff_minutes": config.get("intraday_entry_cutoff_minutes"),
         "intraday_entry_start_minutes": config.get("intraday_entry_start_minutes"),
         "intraday_flatten_minutes": config.get("intraday_flatten_minutes"),
+        "regime_filter_enabled": config.get("regime_filter_enabled", False),
+        "regime_sma": config.get("regime_sma", 200),
     })
     return candidate
 
@@ -110,14 +121,16 @@ def _candidate_config(config: dict) -> dict:
 def run_grid(bars_by_symbol: dict[str, list[dict]], sectors: dict[str, str],
              base_config: dict, variants: list[dict], *,
              persist: bool = False, min_oos_trades: int = 30,
-             confidence: float = 0.95) -> list[dict]:
+             confidence: float = 0.95,
+             regime_bars: list[dict] | None = None) -> list[dict]:
     cost = 2.0 * float(base_config["cost_bps_per_side"]) / 100.0
     rows = []
     for variant in variants:
         config = {**base_config, **variant}
         result = simulate_portfolio(
             bars_by_symbol, config, sectors=sectors,
-            validation={"confidence": confidence})
+            validation={"confidence": confidence},
+            regime_bars=regime_bars if config.get("regime_filter_enabled") else None)
         out_of_sample = result.get("out_of_sample") or {}
         significance = out_of_sample.get("significance") or {}
         oos_metrics = out_of_sample.get("metrics") or {}
@@ -309,7 +322,9 @@ def main():
                         help="Comma-separated minutes before the close after which no "
                              "new intraday entry is allowed, e.g. 240 stops at 12:00 ET")
     parser.add_argument("--regime-smas", default="50,100,200",
-                        help="Daily mode: moving-average periods for the regime filter")
+                        help="Regime moving-average periods. Daily mode builds the "
+                             "regime matrix; intraday mode adds gated variants and "
+                             "treats 0 as the ungated baseline, e.g. 0,100")
     parser.add_argument("--regime-symbol", default="SPY",
                         help="Daily mode: symbol that defines the risk regime")
     parser.add_argument("--cost-bps", type=float, default=None,
@@ -405,13 +420,24 @@ def main():
             "split_fraction": args.split_fraction,
             "mandate": mandate,
         }
+        intraday_regime_smas = _ints(args.regime_smas) if args.regime_smas else None
         variants = build_variants(
             _floats(args.spreads), _floats(args.rsis),
             _fast_slows(args.fast_slows),
             [item.strip() for item in args.exit_styles.split(",") if item.strip()],
             [item.strip() for item in args.premises.split(",") if item.strip()],
             _ints(args.entry_cutoffs) if args.entry_cutoffs else None,
+            intraday_regime_smas,
         )
+        regime_bars = None
+        if any(sma > 0 for sma in (intraday_regime_smas or [])):
+            regime_bars = recent_daily_bars(
+                args.regime_symbol.upper(),
+                max(400, max(intraday_regime_smas) + 60))
+            if len(regime_bars) < max(intraday_regime_smas) + 1:
+                raise SystemExit(
+                    f"Not enough stored daily bars for regime symbol "
+                    f"{args.regime_symbol}; backfill it first")
         sectors = {symbol: sector_for_symbol(symbol, settings)
                    for symbol in bars_by_symbol}
         log.info("Running %s variants over %s symbols and %s bars",
@@ -420,7 +446,8 @@ def main():
         rows = run_grid(
             bars_by_symbol, sectors, base_config, variants,
             persist=args.persist, min_oos_trades=args.min_oos_trades,
-            confidence=settings.validation_confidence)
+            confidence=settings.validation_confidence,
+            regime_bars=regime_bars)
 
     print_table(rows)
     promoted = [row for row in rows if row["validated"]]
