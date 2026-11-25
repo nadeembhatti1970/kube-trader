@@ -6,6 +6,7 @@ stream, so backfilled history cannot trigger signals, backtests, or orders.
 Usage:
     python -m app.services.backfill --days 30
     python -m app.services.backfill --days 60 --symbols AAPL,MSFT --feed sip
+    python -m app.services.backfill --start 2026-02-01 --end 2026-03-01
 """
 import argparse
 import logging
@@ -77,16 +78,21 @@ def resolve_symbols(explicit: str | None, limit: int) -> list[str]:
 
 
 def backfill(days: int, symbols: list[str], feed: DataFeed,
-             batch_symbols: int = 10, timeframe: str = "minute") -> int:
-    """Fetch and store historical bars; returns the number of rows written."""
+             batch_symbols: int = 10, timeframe: str = "minute",
+             start: datetime | None = None, end: datetime | None = None) -> int:
+    """Fetch and store historical bars; returns the number of rows written.
+
+    `start`/`end` bound an explicit window so a long backfill can run in monthly
+    slices that each fit in memory and can be resumed after a failure.
+    """
     if timeframe not in {"minute", "day"}:
         raise ValueError("timeframe must be minute or day")
     if not settings.alpaca_api_key or not settings.alpaca_secret_key:
         raise RuntimeError("Alpaca credentials are required for a historical backfill")
     client = StockHistoricalDataClient(
         settings.alpaca_api_key, settings.alpaca_secret_key)
-    end = datetime.now(timezone.utc)
-    start = end - timedelta(days=days)
+    end = end or datetime.now(timezone.utc)
+    start = start or (end - timedelta(days=days))
     frame = TimeFrame.Day if timeframe == "day" else TimeFrame.Minute
     # Daily strategy signals are computed on adjusted closes, so adjust the history.
     adjustment = Adjustment.ALL if timeframe == "day" else Adjustment.RAW
@@ -124,7 +130,17 @@ def main():
                         help="Symbols per Alpaca request (default 10)")
     parser.add_argument("--feed", default=settings.alpaca_data_feed,
                         choices=["iex", "sip"], help="Alpaca data feed")
+    parser.add_argument("--start", default=None,
+                        help="Inclusive ISO start date; bounds the window with --end")
+    parser.add_argument("--end", default=None,
+                        help="Exclusive ISO end date; defaults to now")
     args = parser.parse_args()
+    start = (datetime.fromisoformat(args.start).replace(tzinfo=timezone.utc)
+             if args.start else None)
+    end = (datetime.fromisoformat(args.end).replace(tzinfo=timezone.utc)
+           if args.end else None)
+    if start and end and start >= end:
+        raise SystemExit("--start must be before --end")
     days = args.days if args.days is not None else (
         1000 if args.timeframe == "day" else 30)
     if days < 1:
@@ -135,9 +151,12 @@ def main():
     except ValueError as exc:
         raise SystemExit(str(exc)) from exc
     feed = DataFeed.SIP if args.feed.lower() == "sip" else DataFeed.IEX
-    log.info("Backfilling %s symbols of %s bars for %s days from the %s feed",
-             len(symbols), args.timeframe, days, feed.value)
-    stored = backfill(days, symbols, feed, args.batch_symbols, args.timeframe)
+    window = (f"{start.date()} to {end.date()}" if start and end
+              else f"{days} days")
+    log.info("Backfilling %s symbols of %s bars for %s from the %s feed",
+             len(symbols), args.timeframe, window, feed.value)
+    stored = backfill(days, symbols, feed, args.batch_symbols, args.timeframe,
+                      start=start, end=end)
     log.info("Backfill complete: %s %s bars across %s symbols",
              stored, args.timeframe, len(symbols))
 

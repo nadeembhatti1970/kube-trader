@@ -938,6 +938,13 @@ def latest_account_snapshot():
         return db.execute("SELECT * FROM account_snapshots ORDER BY captured_at DESC LIMIT 1").fetchone()
 
 
+def newest_account_snapshot_at():
+    """Timestamp of the newest snapshot; the watchdog's liveness signal."""
+    with connect() as db:
+        row = db.execute("SELECT MAX(captured_at) AS captured_at FROM account_snapshots").fetchone()
+    return row["captured_at"] if row else None
+
+
 def save_universe_snapshot(records: list[dict]):
     with connect() as db:
         db.execute("DELETE FROM universe_screen")

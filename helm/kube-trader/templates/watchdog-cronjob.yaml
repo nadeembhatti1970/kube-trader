@@ -1,0 +1,45 @@
+{{- if .Values.watchdog.enabled }}
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: {{ include "kube-trader.fullname" . }}-watchdog
+  labels:
+    app: {{ include "kube-trader.fullname" . }}-watchdog
+spec:
+  schedule: {{ .Values.watchdog.schedule | quote }}
+  concurrencyPolicy: Forbid
+  startingDeadlineSeconds: 120
+  successfulJobsHistoryLimit: 3
+  failedJobsHistoryLimit: 3
+  jobTemplate:
+    spec:
+      backoffLimit: 0
+      ttlSecondsAfterFinished: 3600
+      template:
+        metadata:
+          labels:
+            app: {{ include "kube-trader.fullname" . }}-watchdog
+        spec:
+          restartPolicy: Never
+          containers:
+            - name: watchdog
+              image: "{{ .Values.image.repository }}:{{ .Values.image.tag }}"
+              imagePullPolicy: {{ .Values.image.pullPolicy }}
+              command:
+                - python
+                - -m
+                - app.watchdog
+                - --max-age-seconds
+                - {{ .Values.watchdog.maxSnapshotAgeSeconds | quote }}
+                - --repeat-seconds
+                - {{ .Values.watchdog.alertRepeatSeconds | quote }}
+                - --api-url
+                - http://{{ include "kube-trader.fullname" . }}:{{ .Values.service.port }}
+              envFrom:
+                - configMapRef:
+                    name: {{ include "kube-trader.fullname" . }}
+                - secretRef:
+                    name: {{ .Values.secrets.existingSecret }}
+              resources:
+                {{- toYaml .Values.watchdog.resources | nindent 16 }}
+{{- end }}

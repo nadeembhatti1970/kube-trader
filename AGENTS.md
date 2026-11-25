@@ -32,6 +32,7 @@ Docker Compose, Kubernetes, and Helm definitions should keep these workers in se
 - Preserve Redis consumer-group acknowledgements and pending-event recovery. Keep order reservations idempotent using the database uniqueness constraint and Alpaca client order IDs.
 - Never commit `.env`, credentials, webhook URLs, or populated Kubernetes Secrets. Keep placeholders in `.env.example`; use Kubernetes/Helm secret references for deployments.
 - Persist PostgreSQL and Redis data with PVCs in Kubernetes/Helm. Keep the API SQLite cache mounted at `/data`. Do not put operational state in an ephemeral container layer.
+- Keep the pipeline watchdog deployed. Reconciliation writes an account snapshot every ~30s, so `python -m app.watchdog` treats an old snapshot as a stopped trading path and alerts `ALERT_WEBHOOK_URL`; it runs as a CronJob outside the app deployments and must stay enabled in both Helm and raw Kubernetes. A host-level outage still needs an external probe, but a crashed worker, a stuck reconciliation, or a silent namespace must not go unnoticed for days.
 - Keep the API internal by default (`ClusterIP`); document authentication and network requirements before adding an ingress or public endpoint. Research backtest endpoints must label their cost assumptions, sample split, and limitations; never present hypothetical returns as expected profits.
 
 ## Keeping the project coherent

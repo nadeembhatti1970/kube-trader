@@ -53,7 +53,7 @@ data:
   REGIME_SMA: "200"
   SIGNAL_FAST_BARS: "5"
   SIGNAL_SLOW_BARS: "20"
-  SIGNAL_MIN_SPREAD_PCT: "0.001"
+  SIGNAL_MIN_SPREAD_PCT: "0.002"
   SIGNAL_MIN_BUY_RSI: "55"
   SWING_ATR_PERIOD: "14"
   SWING_ATR_MULTIPLE: "2.0"
@@ -258,3 +258,43 @@ spec:
           resources:
             requests: {cpu: 100m, memory: 256Mi}
             limits: {cpu: "1", memory: 1Gi}
+---
+# Reconciliation writes an account snapshot every ~30s; a stale snapshot means the
+# trading path has stopped even when the API still answers. Runs outside the app
+# deployments so a crashed worker or pod does not take the check down with it.
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: kube-trader-watchdog
+  namespace: kube-trader
+spec:
+  schedule: "*/10 * * * *"
+  concurrencyPolicy: Forbid
+  successfulJobsHistoryLimit: 3
+  failedJobsHistoryLimit: 3
+  jobTemplate:
+    spec:
+      backoffLimit: 0
+      ttlSecondsAfterFinished: 3600
+      template:
+        spec:
+          restartPolicy: Never
+          containers:
+            - name: watchdog
+              image: kube-trader:latest
+              command:
+                - python
+                - -m
+                - app.watchdog
+                - --max-age-seconds
+                - "900"
+                - --repeat-seconds
+                - "1800"
+                - --api-url
+                - http://kube-trader:80
+              envFrom:
+                - configMapRef: {name: kube-trader-config}
+                - secretRef: {name: kube-trader-secrets}
+              resources:
+                requests: {cpu: 10m, memory: 64Mi}
+                limits: {cpu: 200m, memory: 256Mi}

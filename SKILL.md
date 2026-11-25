@@ -3,7 +3,7 @@
 ## Metadata
 
 - **Name:** `kube-trader-pipeline`
-- **Version:** 2.9.0
+- **Version:** 2.10.0
 - **Target:** Docker Compose or Kubernetes/Helm deployment
 - **Purpose:** Describe how the implemented data, signal, backtest, paper/live execution, allocation, reconciliation, and circuit-breaker workers operate.
 
@@ -133,7 +133,7 @@ Validation records carry a `scheme_version` (currently 5). The version is part o
 
 With `REQUIRE_VALIDATED_STRATEGY=true`, new entries are blocked unless that record exists, which prevents risk from growing on an untested configuration. Validation is still evidence, not a guarantee.
 
-`python -m app.services.research_grid` runs the same matrix in-process against stored bars, ranks variants by out-of-sample gross edge, and promotes only those whose out-of-sample interval clears zero. `--persist` stores each verdict; it never publishes to Redis or places orders. `--entry-cutoffs` (minutes before the close) tests an intraday entry window, e.g. `30,240` compares the current 15:30 ET cutoff with noon, and `--regime-smas` adds gated intraday variants that block entries while the regime symbol's prior close is below its moving average (`0` is the ungated baseline).
+`python -m app.services.research_grid` runs the same matrix in-process against stored bars, ranks variants by out-of-sample gross edge, and promotes only those whose out-of-sample interval clears zero. `--persist` stores each verdict; it never publishes to Redis or places orders. `--entry-cutoffs` (minutes before the close) tests an intraday entry window, e.g. `30,240` compares the current 15:30 ET cutoff with noon, `--regime-smas` adds gated intraday variants that block entries while the regime symbol's prior close is below its moving average (`0` is the ungated baseline), and `--min-holds`, `--exit-confirmations`, and `--resamples` sweep minimum hold time, exit-confirmation spread, and bar size.
 
 ## Operational endpoints and deployment
 
@@ -145,6 +145,7 @@ With `REQUIRE_VALIDATED_STRATEGY=true`, new entries are blocked unless that reco
 - `GET /research/portfolio/daily`: swing and core daily pools simulated together from `daily_bars`, with the same split, significance, and benchmark reporting.
 - `python -m app.services.backfill --days 30`: seeds historical minute bars for research. It writes PostgreSQL only and never publishes to `market.bars`, so history cannot trigger signals or orders. Supports `--symbols` and `--feed sip|iex`, and is safe to rerun. `--timeframe day --days 1000` instead fills `daily_bars` with adjusted daily bars for the swing and core simulator.
 - `python -m app.services.research_grid --persist`: ranks stored-bar variants by out-of-sample gross edge and stores verdicts; it never places orders. `--mode daily` runs the swing/core regime matrix instead.
+- `python -m app.watchdog --dry-run`: reports the age of the newest account snapshot, whether it exceeds `--max-age-seconds`, and optionally probes `--api-url/healthz`. Without `--dry-run` it alerts `ALERT_WEBHOOK_URL` on failure and once on recovery, deduping through Redis so a long outage alerts at most every `--repeat-seconds`. It exits non-zero while the pipeline is stale, and the chart runs it as a CronJob outside the app deployments.
 - `python -m app.services.maintenance --purge-stale-validations`: deletes validation verdicts from older scheme versions. Also returns `summary_by_exit_reason`, a pro-rata `fee_estimate` with per-slice `estimated_net_realized_pnl` (labelled estimated, never replacing strict per-order fees), `execution_latency` percentiles, `bar_coverage`, and an ETF `benchmark` return over the closed-trade window.
 - `GET /account/reconciliation`: latest account and allocation snapshot, including `ledger_discrepancies`, `open_risk`, `unmanaged_bot_origin_positions`, and `warnings`. JSON GET responses are named `<endpoint>_<UTC timestamp>.json` via `Content-Disposition` (`attachment` only with `?download=true`; otherwise `inline`).
 - `GET /risk`: current New York-date breaker state.

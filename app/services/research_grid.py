@@ -51,7 +51,10 @@ def build_variants(spreads: list[float], rsis: list[float],
                    exit_styles: list[str],
                    premises: list[str] | None = None,
                    entry_cutoffs: list[int] | None = None,
-                   regime_smas: list[int] | None = None) -> list[dict]:
+                   regime_smas: list[int] | None = None,
+                   min_holds: list[float] | None = None,
+                   exit_confirmation_spreads: list[float] | None = None,
+                   resamples: list[int] | None = None) -> list[dict]:
     variants = []
     for premise in premises or ["sma_crossover"]:
         for spread in spreads:
@@ -60,20 +63,29 @@ def build_variants(spreads: list[float], rsis: list[float],
                     for style in exit_styles:
                         for cutoff in entry_cutoffs or [None]:
                             for regime_sma in regime_smas or [None]:
-                                variant = {
-                                    "min_spread_pct": spread,
-                                    "min_buy_rsi": rsi,
-                                    "fast_bars": fast,
-                                    "slow_bars": slow,
-                                    "exit_style": style,
-                                    "premise": premise,
-                                }
-                                if cutoff is not None:
-                                    variant["intraday_entry_cutoff_minutes"] = cutoff
-                                if regime_sma is not None:
-                                    variant["regime_filter_enabled"] = regime_sma > 0
-                                    variant["regime_sma"] = max(regime_sma, 1)
-                                variants.append(variant)
+                                for hold in min_holds or [None]:
+                                    for confirm in exit_confirmation_spreads or [None]:
+                                        for resample in resamples or [None]:
+                                            variant = {
+                                                "min_spread_pct": spread,
+                                                "min_buy_rsi": rsi,
+                                                "fast_bars": fast,
+                                                "slow_bars": slow,
+                                                "exit_style": style,
+                                                "premise": premise,
+                                            }
+                                            if cutoff is not None:
+                                                variant["intraday_entry_cutoff_minutes"] = cutoff
+                                            if regime_sma is not None:
+                                                variant["regime_filter_enabled"] = regime_sma > 0
+                                                variant["regime_sma"] = max(regime_sma, 1)
+                                            if hold is not None:
+                                                variant["min_hold_minutes"] = hold
+                                            if confirm is not None:
+                                                variant["exit_confirmation_spread_pct"] = confirm
+                                            if resample is not None:
+                                                variant["resample_minutes"] = resample
+                                            variants.append(variant)
     return variants
 
 
@@ -86,9 +98,16 @@ def variant_label(variant: dict) -> str:
     regime_note = ""
     if variant.get("regime_filter_enabled"):
         regime_note = f" reg{variant.get('regime_sma')}"
+    extra = ""
+    if variant.get("min_hold_minutes"):
+        extra += f" hold{variant['min_hold_minutes']:g}"
+    if variant.get("exit_confirmation_spread_pct"):
+        extra += f" conf{variant['exit_confirmation_spread_pct']:g}"
+    if int(variant.get("resample_minutes") or 1) > 1:
+        extra += f" rs{variant['resample_minutes']}"
     return (f"{prefix}{variant['fast_bars']}/{variant['slow_bars']} "
             f"s{variant['min_spread_pct']:g} r{variant['min_buy_rsi']:g}{suffix}"
-            f"{cutoff_note}{regime_note}")
+            f"{cutoff_note}{regime_note}{extra}")
 
 
 def _candidate_config(config: dict) -> dict:
@@ -318,6 +337,12 @@ def main():
     parser.add_argument("--premises", default="sma_crossover",
                         help="Comma-separated sma_crossover, opening_range_breakout, "
                              "gap_up; spread and RSI apply only to the SMA premise")
+    parser.add_argument("--min-holds", default=None,
+                        help="Comma-separated minimum hold in minutes before an exit")
+    parser.add_argument("--exit-confirmations", default=None,
+                        help="Comma-separated exit-confirmation spreads, e.g. 0,0.0015")
+    parser.add_argument("--resamples", default=None,
+                        help="Comma-separated bar sizes in minutes, e.g. 1,5")
     parser.add_argument("--entry-cutoffs", default=None,
                         help="Comma-separated minutes before the close after which no "
                              "new intraday entry is allowed, e.g. 240 stops at 12:00 ET")
@@ -428,6 +453,9 @@ def main():
             [item.strip() for item in args.premises.split(",") if item.strip()],
             _ints(args.entry_cutoffs) if args.entry_cutoffs else None,
             intraday_regime_smas,
+            _floats(args.min_holds) if args.min_holds else None,
+            _floats(args.exit_confirmations) if args.exit_confirmations else None,
+            _ints(args.resamples) if args.resamples else None,
         )
         regime_bars = None
         if any(sma > 0 for sma in (intraday_regime_smas or [])):

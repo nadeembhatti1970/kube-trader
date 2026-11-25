@@ -56,6 +56,20 @@ class VariantTests(unittest.TestCase):
         self.assertTrue(research_grid.variant_label(variants[1]).endswith("reg100"))
         self.assertNotIn("reg", research_grid.variant_label(variants[0]))
 
+    def test_hold_confirmation_and_resample_expand_and_label(self):
+        variants = research_grid.build_variants(
+            [0.001], [65.0], [(5, 20)], ["signal"], ["sma_crossover"], None, None,
+            [15.0], [0.0015], [5])
+        self.assertEqual(len(variants), 1)
+        variant = variants[0]
+        self.assertEqual(variant["min_hold_minutes"], 15.0)
+        self.assertEqual(variant["exit_confirmation_spread_pct"], 0.0015)
+        self.assertEqual(variant["resample_minutes"], 5)
+        label = research_grid.variant_label(variant)
+        self.assertIn("hold15", label)
+        self.assertIn("conf0.0015", label)
+        self.assertIn("rs5", label)
+
     def test_label_carries_the_premise(self):
         label = research_grid.variant_label({
             "fast_bars": 5, "slow_bars": 20, "min_spread_pct": 0.001,

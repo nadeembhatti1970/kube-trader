@@ -138,9 +138,12 @@ python -m app.services.backfill --timeframe day --days 1000
 
 ```sh
 python -m app.services.maintenance --purge-stale-validations
+python -m app.watchdog --dry-run
 ```
 
 Deletes validation verdicts written under older schemes. The schema-versioned hash already prevents them from satisfying the gate; purging simply keeps the table readable.
+
+`python -m app.watchdog` is the liveness check. Reconciliation writes an account snapshot every ~30s, so the age of the newest snapshot is the trading path's heartbeat; the watchdog reports stale when that age exceeds `--max-age-seconds` (default 900), optionally probes `--api-url/healthz`, and posts to `ALERT_WEBHOOK_URL` on failure and once on recovery. Repeated runs dedupe through a Redis key so a long outage alerts at most every `--repeat-seconds` (default 1800). `--dry-run` prints the snapshot age and exits without alerting or touching Redis. The Helm chart and `k8s/app.yaml` run it as a CronJob every ten minutes; because it runs outside the app deployments, it survives a crashed worker or pod, and its exit code is non-zero while the pipeline is stale.
 
 Trade reports group closed slices by entry app version as well as effective strategy/risk configuration. Orders record configured risk controls and the calculated order sizing; trades without recorded provenance remain `unknown` and are not backfilled from current settings.
 
@@ -235,7 +238,7 @@ The chart defaults to paper mode with execution and new entries enabled. For an 
 | `STOP_LOSS_PCT` / `TAKE_PROFIT_PCT` | `0.02` / `0.04` | Default bracket exit distances |
 | `INTRADAY_ALLOCATION_PCT` / `SWING_ALLOCATION_PCT` / `CORE_ALLOCATION_PCT` | `0.20` / `0.30` / `0.50` | Virtual portfolio pool targets; must sum to 1.0 |
 | `SIGNAL_FAST_BARS` / `SIGNAL_SLOW_BARS` | `5` / `20` | SMA periods, in minute bars |
-| `SIGNAL_MIN_SPREAD_PCT` / `SIGNAL_MIN_BUY_RSI` | `0.001` / `55` | An intraday buy needs the fast SMA at least this fraction above the slow SMA and RSI(14) at or above this level. An unconfirmed crossover is not recorded, so the buy can still fire on a later bar. Sell crossovers are never filtered. Set `0` / `0` for the previous behaviour |
+| `SIGNAL_MIN_SPREAD_PCT` / `SIGNAL_MIN_BUY_RSI` | `0.001` / `55` (deploy files set `0.002` / `65`) | An intraday buy needs the fast SMA at least this fraction above the slow SMA and RSI(14) at or above this level. An unconfirmed crossover is not recorded, so the buy can still fire on a later bar. Sell crossovers are never filtered. Set `0` / `0` for the previous behaviour |
 | `SWING_ATR_PERIOD` / `SWING_ATR_MULTIPLE` | `14` / `2.0` | Daily ATR stop distance for swing orders |
 | `CORE_STOP_LOSS_PCT` | `0.20` | Core GTC protective stop distance (20% default) |
 | `BACKTEST_COST_BPS` / `BACKTEST_TRAIN_FRACTION` | `5` / `0.70` | Research endpoint's estimated one-way costs and chronological train split |

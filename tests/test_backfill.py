@@ -100,6 +100,32 @@ class BackfillRunTests(unittest.TestCase):
             list(instances[0].requests[0].symbol_or_symbols), ["AAPL", "MSFT"])
         self.assertEqual(save.call_count, 2)
 
+    def test_explicit_window_bounds_the_request(self):
+        instances = []
+
+        class FakeClient:
+            def __init__(self, *args, **kwargs):
+                self.requests = []
+                instances.append(self)
+
+            def get_stock_bars(self, request):
+                self.requests.append(request)
+                return SimpleNamespace(data={})
+
+        start = datetime(2026, 2, 1, tzinfo=timezone.utc)
+        end = datetime(2026, 3, 1, tzinfo=timezone.utc)
+        with patch.object(backfill, "StockHistoricalDataClient", FakeClient), \
+                patch.object(backfill, "save_bars", return_value=0), \
+                patch.object(backfill.settings, "alpaca_api_key", "key"), \
+                patch.object(backfill.settings, "alpaca_secret_key", "secret"):
+            backfill.backfill(30, ["AAPL"], backfill.DataFeed.IEX,
+                              batch_symbols=1, start=start, end=end)
+
+        request = instances[0].requests[0]
+        # StockBarsRequest normalises the bounds to naive UTC datetimes.
+        self.assertEqual(request.start, start.replace(tzinfo=None))
+        self.assertEqual(request.end, end.replace(tzinfo=None))
+
     def test_daily_timeframe_writes_daily_bars(self):
         instances = []
 
