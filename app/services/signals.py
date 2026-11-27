@@ -182,11 +182,14 @@ def process_bars(redis_client, symbol: str, messages: list[tuple[str, dict]]):
                 above = fast > slow
                 previous = strategy_is_above(symbol)
                 rsi_value = rsi(values)
-                # Leave the state unchanged for an unconfirmed buy so a later bar can confirm it.
-                if above and not previous and not entry_confirmed(fast, slow, rsi_value):
-                    above = previous
+                # A buy must be decisive on the crossover bar itself, which is what the
+                # research simulator tests. Retrying an unconfirmed crossover on later
+                # bars is not the same rule: a fresh crossover starts with fast ~= slow,
+                # so almost every crossover eventually clears the threshold, and the
+                # filter stops cutting trades.
+                confirmed = entry_confirmed(fast, slow, rsi_value)
                 save_strategy_state(symbol, above)
-                if above != previous:
+                if above != previous and (not above or confirmed):
                     action = "buy" if above else "sell"
                     output_signals.append({
                         "id": message_id, "symbol": symbol, "action": action,

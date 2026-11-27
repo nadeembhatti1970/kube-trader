@@ -158,5 +158,61 @@ class SignalBatchTests(unittest.TestCase):
             self.assertEqual(event["signal_bar_seconds"], signals.SIGNAL_BAR_SECONDS)
 
 
+class CrossoverConfirmationTests(unittest.TestCase):
+    """A buy fires only when the crossover bar itself is decisive."""
+
+    class Redis:
+        def __init__(self):
+            self.acked = []
+
+        def xack(self, stream, group, message_id):
+            self.acked.append(message_id)
+
+    def run_bars(self, closes, previous_above, confirmed):
+        redis_client = self.Redis()
+        events = []
+        rows = [{"close": value} for value in closes]
+        with patch.object(signals, "recent_closes", return_value=rows), \
+                patch.object(signals, "strategy_is_above", return_value=previous_above), \
+                patch.object(signals, "save_strategy_state") as save, \
+                patch.object(signals, "entry_confirmed", return_value=confirmed), \
+                patch.object(signals, "daily_signals", return_value=[]), \
+                patch.object(signals, "publish",
+                             side_effect=lambda stream, payload: events.append(payload)):
+            signals.process_bars(redis_client, "AAPL", [(
+                "1-0", {"data": '{"symbol": "AAPL", "close": 100.0, "ts": "2026-11-27T15:00:00Z"}'},
+            )])
+        return events, save, redis_client
+
+    def closes(self, rising=True, count=25):
+        base = [100.0] * count
+        if rising:
+            base[-5:] = [101.0, 102.0, 103.0, 104.0, 105.0]
+        else:
+            base[-5:] = [99.0, 98.0, 97.0, 96.0, 95.0]
+        return base
+
+    def test_confirmed_crossover_emits_a_buy(self):
+        events, save, redis_client = self.run_bars(
+            self.closes(rising=True), previous_above=False, confirmed=True)
+        self.assertEqual([event["action"] for event in events], ["buy"])
+        save.assert_called_once_with("AAPL", True)
+        self.assertEqual(redis_client.acked, ["1-0"])
+
+    def test_unconfirmed_crossover_is_consumed_not_retried(self):
+        events, save, redis_client = self.run_bars(
+            self.closes(rising=True), previous_above=False, confirmed=False)
+        self.assertEqual(events, [])
+        # State still advances, so the same crossover is never evaluated again.
+        save.assert_called_once_with("AAPL", True)
+        self.assertEqual(redis_client.acked, ["1-0"])
+
+    def test_sell_crossover_is_never_filtered(self):
+        events, save, _ = self.run_bars(
+            self.closes(rising=False), previous_above=True, confirmed=False)
+        self.assertEqual([event["action"] for event in events], ["sell"])
+        save.assert_called_once_with("AAPL", False)
+
+
 if __name__ == "__main__":
     unittest.main()
